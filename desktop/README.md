@@ -74,7 +74,7 @@ Observed results:
 - Full legacy/migration suite: 38 passed, 2 xfailed.
 - Migration regression file: 7 passed, 2 xfailed.
 - Non-legacy-gap selection: 38 passed, 2 deselected.
-- Worker tests: 5 passed.
+- Worker tests: 7 passed.
 - Frontend build: passed.
 - Cargo check: passed.
 - Tauri NSIS build: produced `TACOS Desktop_0.1.0_x64-setup.exe`.

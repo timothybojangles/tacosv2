@@ -102,7 +102,34 @@ def app_store() -> Store:
             )
             """
         )
+    recover_account_index(root, ledger)
     return Store(root=root, ledger=ledger, datasets=datasets, accounts=accounts)
+
+
+def recover_account_index(root: Path, ledger: Path) -> None:
+    compatibility_db = root / "db" / "credentials.db"
+    if not compatibility_db.is_file():
+        return
+    try:
+        with sqlite3.connect(compatibility_db) as source:
+            rows = source.execute(
+                "SELECT account_name, region, base_currency FROM credentials"
+            ).fetchall()
+    except sqlite3.Error:
+        return
+    now = time.time()
+    with sqlite3.connect(ledger) as destination:
+        for account_name, region, base_currency in rows:
+            if region not in SUPPORTED_REGIONS:
+                continue
+            destination.execute(
+                """
+                INSERT OR IGNORE INTO accounts
+                    (account_name, region, base_currency, updated_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (account_name, region, base_currency, now),
+            )
 
 
 def normalize_account_name(value: Any) -> str:

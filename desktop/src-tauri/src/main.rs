@@ -1,5 +1,5 @@
 use serde_json::{json, Value};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::Mutex;
@@ -62,6 +62,7 @@ fn start_worker() -> Result<WorkerProcess, String> {
         .map_err(|err| format!("Could not start Python worker: {err}"))?;
     let stdin = child.stdin.take().ok_or("Worker stdin unavailable")?;
     let stdout = child.stdout.take().ok_or("Worker stdout unavailable")?;
+    let mut stderr = child.stderr.take().ok_or("Worker stderr unavailable")?;
     let mut process = WorkerProcess {
         child,
         stdin,
@@ -72,6 +73,24 @@ fn start_worker() -> Result<WorkerProcess, String> {
         .stdout
         .read_line(&mut ready)
         .map_err(|err| format!("Worker did not become ready: {err}"))?;
+    if ready.is_empty() {
+        let mut details = String::new();
+        let _ = stderr.read_to_string(&mut details);
+        let message = details.trim();
+        return Err(if message.is_empty() {
+            "The Python worker exited before becoming ready.".to_string()
+        } else {
+            format!("The Python worker exited before becoming ready: {message}")
+        });
+    }
+    let ready_value: Value = serde_json::from_str(&ready)
+        .map_err(|err| format!("Worker returned an invalid ready message: {err}"))?;
+    if ready_value.get("type").and_then(Value::as_str) != Some("ready") {
+        return Err("Worker returned an unexpected ready message.".to_string());
+    }
+    std::thread::spawn(move || {
+        let _ = std::io::copy(&mut stderr, &mut std::io::sink());
+    });
     Ok(process)
 }
 

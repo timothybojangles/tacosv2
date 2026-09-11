@@ -68,6 +68,15 @@ async function engine(method: string, params: Record<string, unknown> = {}) {
   return response.result;
 }
 
+function errorMessage(error: unknown) {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  if (error && typeof error === "object" && "message" in error) {
+    return String(error.message);
+  }
+  return "Action failed";
+}
+
 function formatTime(value?: number) {
   return value ? new Date(value * 1000).toLocaleString() : "Not yet";
 }
@@ -124,7 +133,7 @@ export default function App() {
     try {
       await action();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Action failed");
+      setError(errorMessage(err));
     } finally {
       setBusy("");
     }

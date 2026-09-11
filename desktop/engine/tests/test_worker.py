@@ -1,6 +1,9 @@
 import csv
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -11,6 +14,46 @@ from tacos_engine.worker import app_store, handle
 
 def _request(method, params=None, request_id="request-1"):
     return {"protocolVersion": 1, "id": request_id, "method": method, "params": params or {}}
+
+
+def test_source_entrypoint_starts_outside_repository_root(tmp_path):
+    entrypoint = Path(worker.__file__).resolve().parents[1] / "worker.py"
+    env = os.environ.copy()
+    env["TACOS_CREDENTIAL_BACKEND"] = "sqlite_plaintext"
+    env["TACOS_DESKTOP_DATA_DIR"] = str(tmp_path / "appdata")
+    completed = subprocess.run(
+        [sys.executable, str(entrypoint)],
+        cwd=entrypoint.parent,
+        env=env,
+        input=json.dumps(_request("shutdown", request_id="shutdown-source")) + "\n",
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=True,
+    )
+    messages = [json.loads(line) for line in completed.stdout.splitlines()]
+    assert messages[0]["type"] == "ready"
+    assert messages[-1]["result"] == {"shutdown": True}
+
+
+def test_account_index_recovers_from_local_compatibility_store(tmp_path, monkeypatch):
+    monkeypatch.setenv("TACOS_CREDENTIAL_BACKEND", "sqlite_plaintext")
+    root = tmp_path / "appdata"
+    monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(root))
+    (root / "db").mkdir(parents=True)
+    with sqlite3.connect(root / "db" / "credentials.db") as conn:
+        conn.execute(
+            "CREATE TABLE credentials (account_name TEXT, app_ref TEXT, token TEXT, region TEXT, base_currency TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO credentials VALUES ('recovered', 'app', 'secret', 'euw1', 'GBP')"
+        )
+
+    store = app_store()
+    with sqlite3.connect(store.ledger) as conn:
+        assert conn.execute(
+            "SELECT account_name, region, base_currency FROM accounts"
+        ).fetchall() == [("recovered", "euw1", "GBP")]
 
 
 def test_worker_imports_and_pages_csv(tmp_path, monkeypatch, capsys):
