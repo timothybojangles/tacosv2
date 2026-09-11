@@ -1,3 +1,4 @@
+import csv
 import json
 import sqlite3
 from pathlib import Path
@@ -181,10 +182,11 @@ def test_inventory_validation_returns_accepted_and_rejected_rows(tmp_path, monke
         )
 
     source = tmp_path / "inventory.csv"
+    rejected_rows = "".join(f"BAD-SKU-{index},3,A,2.00,1\n" for index in range(105))
     source.write_text(
         "sku,quantity,locationName,costprice,warehouseId\n"
         "GOOD-SKU,2,A,1.50,1\n"
-        "BAD-SKU,3,A,2.00,1\n",
+        + rejected_rows,
         encoding="utf-8",
     )
     handle(
@@ -198,8 +200,29 @@ def test_inventory_validation_returns_accepted_and_rejected_rows(tmp_path, monke
 
     result = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
     assert result["inserted"] == 1
-    assert result["rejected"] == 1
-    assert result["totalRows"] == 2
+    assert result["rejected"] == 105
+    assert result["totalRows"] == 106
     assert result["validatedPreview"][0]["sku"] == "GOOD-SKU"
-    assert result["rejectedPreview"][0]["sku"] == "BAD-SKU"
+    assert result["rejectedPreview"][0]["sku"] == "BAD-SKU-0"
     assert result["rejectedPreview"][0]["category"] == "unmatched_sku"
+    assert len(result["rejectedPreview"]) == 100
+
+    destination = tmp_path / "saved-exceptions.csv"
+    handle(
+        store,
+        _request(
+            "saveInventoryExceptionReport",
+            {
+                "accountName": "demo",
+                "reportPath": result["exceptionReportPath"],
+                "destination": str(destination),
+            },
+            "save-report-1",
+        ),
+    )
+    saved = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert saved["ok"] is True
+    with destination.open(encoding="utf-8-sig", newline="") as handle_file:
+        full_report = list(csv.DictReader(handle_file))
+    assert len(full_report) == 105
+    assert full_report[-1]["sku"] == "BAD-SKU-104"

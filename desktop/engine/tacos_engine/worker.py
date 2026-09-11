@@ -7,6 +7,7 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -476,7 +477,10 @@ def validate_inventory_file(store: Store, request_id: str, params: dict[str, Any
             account_name,
             log_callback=worker_log,
         )
-    rejected, rejected_rows = inventory_rejection_preview(exception_files)
+    reports_dir = store.accounts / account_name / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    report_path = reports_dir / f"inventory-exceptions-{int(time.time() * 1000)}.csv"
+    rejected, rejected_rows = inventory_rejection_report(exception_files, report_path)
     counts = reference_counts(db_path)
     update_job(
         store,
@@ -494,35 +498,71 @@ def validate_inventory_file(store: Store, request_id: str, params: dict[str, Any
         "logs": logs,
         "validatedPreview": validated_inventory_preview(db_path),
         "rejectedPreview": rejected_rows,
+        "exceptionReportPath": str(report_path) if rejected else None,
+        "exceptionReportFileName": report_path.name if rejected else None,
     }
 
 
-def inventory_rejection_preview(exception_files: dict[str, Path], limit: int = 100) -> tuple[int, list[dict[str, Any]]]:
+def inventory_rejection_report(
+    exception_files: dict[str, Path], report_path: Path, limit: int = 100
+) -> tuple[int, list[dict[str, Any]]]:
     reasons = {
         "missing_required": "Missing or invalid required value",
         "unmatched_sku": "SKU was not found in the synced product catalogue",
         "non_stock_tracked": "Product is not stock tracked",
         "unmatched_location": "Warehouse or location was not found in synced references",
     }
-    rejected_count = 0
-    rejected: list[dict[str, Any]] = []
-    for category, path in exception_files.items():
+    source_fields: list[str] = []
+    for path in exception_files.values():
         if not path.exists():
             continue
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
-            for row in csv.DictReader(handle):
-                rejected_count += 1
-                if len(rejected) >= limit:
-                    continue
-                validation_error = row.pop("validation_error", "").strip()
-                rejected.append(
-                    {
+            for field in csv.DictReader(handle).fieldnames or []:
+                if field != "validation_error" and field not in source_fields:
+                    source_fields.append(field)
+
+    rejected_count = 0
+    rejected: list[dict[str, Any]] = []
+    writer = None
+    report_handle = None
+    try:
+        for category, path in exception_files.items():
+            if not path.exists():
+                continue
+            with path.open("r", encoding="utf-8-sig", newline="") as handle:
+                for row in csv.DictReader(handle):
+                    rejected_count += 1
+                    validation_error = row.pop("validation_error", "").strip()
+                    detailed_row = {
                         "category": category,
                         "reason": validation_error or reasons[category],
                         **row,
                     }
-                )
+                    if writer is None:
+                        report_handle = report_path.open("w", encoding="utf-8-sig", newline="")
+                        writer = csv.DictWriter(report_handle, fieldnames=["category", "reason", *source_fields])
+                        writer.writeheader()
+                    writer.writerow(detailed_row)
+                    if len(rejected) < limit:
+                        rejected.append(detailed_row)
+    finally:
+        if report_handle is not None:
+            report_handle.close()
     return rejected_count, rejected
+
+
+def save_inventory_exception_report(store: Store, params: dict[str, Any]) -> dict[str, Any]:
+    account_name = normalize_account_name(params.get("accountName"))
+    reports_dir = (store.accounts / account_name / "reports").resolve()
+    source = Path(str(params.get("reportPath", ""))).resolve()
+    destination = Path(str(params.get("destination", ""))).expanduser().resolve()
+    if not source.is_relative_to(reports_dir) or not source.is_file():
+        raise WorkerError("report_missing", "The exception report is no longer available.")
+    if destination.suffix.lower() != ".csv" or not destination.parent.is_dir():
+        raise WorkerError("invalid_destination", "Choose a CSV destination in an existing folder.")
+    if source != destination:
+        shutil.copyfile(source, destination)
+    return {"path": str(destination)}
 
 
 def validated_inventory_preview(db_path: Path, limit: int = 50) -> list[dict[str, Any]]:
@@ -768,6 +808,8 @@ def handle(store: Store, request: dict[str, Any]) -> None:
             succeed(request_id, sync_inventory_references(store, request_id, params))
         elif method == "validateInventoryFile":
             succeed(request_id, validate_inventory_file(store, request_id, params))
+        elif method == "saveInventoryExceptionReport":
+            succeed(request_id, save_inventory_exception_report(store, params))
         elif method == "jobHistory":
             succeed(request_id, job_history(store))
         elif method == "cancel":

@@ -1,9 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   AlertTriangle,
   CheckCircle2,
   Database,
+  Download,
   FileSearch,
   FileSpreadsheet,
   FolderOpen,
@@ -187,6 +188,23 @@ export default function App() {
     });
   }
 
+  async function saveExceptionReport() {
+    if (!validation?.exceptionReportPath || !activeAccountName) return;
+    const destination = await save({
+      defaultPath: validation.exceptionReportFileName || "inventory-exceptions.csv",
+      filters: [{ name: "CSV report", extensions: ["csv"] }],
+    });
+    if (typeof destination !== "string") return;
+    await run("saveExceptionReport", async () => {
+      const result = await engine("saveInventoryExceptionReport", {
+        accountName: activeAccountName,
+        reportPath: validation.exceptionReportPath,
+        destination,
+      });
+      setMessage(`Exception report saved to ${result.path}.`);
+    });
+  }
+
   async function refreshHistory() {
     await run("history", async () => {
       const result = await engine("jobHistory");
@@ -361,6 +379,12 @@ export default function App() {
                 <div className="resultCounts">
                   <span className="acceptedCount">Accepted <strong>{validation.inserted}</strong></span>
                   <span className="rejectedCount">Rejected <strong>{validation.rejected}</strong></span>
+                  {validation.rejected > 0 && (
+                    <button onClick={saveExceptionReport} disabled={!!busy}>
+                      {busy === "saveExceptionReport" ? <Loader2 className="spin" size={18} /> : <Download size={18} />}
+                      Save exception report
+                    </button>
+                  )}
                 </div>
               )}
             </div>

@@ -19,16 +19,8 @@ struct EngineState {
 
 fn worker_script() -> Result<PathBuf, String> {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let bundled_dev = manifest
-        .join("..")
-        .join("engine-dist")
-        .join("tacos-engine")
-        .join("tacos-engine.exe");
-    if bundled_dev.exists() {
-        return Ok(bundled_dev);
-    }
     let dev_path = manifest.join("..").join("engine").join("worker.py");
-    if dev_path.exists() {
+    if cfg!(debug_assertions) && dev_path.exists() {
         return Ok(dev_path);
     }
     let exe = std::env::current_exe().map_err(|err| err.to_string())?;
@@ -100,6 +92,7 @@ fn validate_request(request: &Value) -> Result<(), String> {
         | "validateAccount"
         | "syncInventoryReferences"
         | "validateInventoryFile"
+        | "saveInventoryExceptionReport"
         | "jobHistory"
         | "cancel"
         | "shutdown" => Ok(()),

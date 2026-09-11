@@ -321,6 +321,19 @@ dd {
   border-radius: 8px;
 }
 
+.resultCounts button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  border: 0;
+  border-radius: 8px;
+  padding: 0 12px;
+  background: #23634d;
+  color: white;
+  cursor: pointer;
+}
+
 .acceptedCount {
   color: #23634d;
   background: #e7f1ec;

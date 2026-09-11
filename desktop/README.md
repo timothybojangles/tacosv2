@@ -15,6 +15,17 @@ npm run build
 npm run tauri:build
 ```
 
+For normal development, use the Tauri debug shell with Vite hot reload:
+
+```powershell
+cd desktop
+npm run tauri:dev
+```
+
+Debug builds launch `desktop/engine/worker.py` through the repository virtual
+environment, so Python changes do not require PyInstaller or an installer
+rebuild. Release builds use only the privately bundled worker.
+
 `npm run tauri:build` regenerates the private `tacos-engine.exe` worker with
 PyInstaller before building the Tauri app. Generated files under
 `desktop/engine-dist`, `desktop/dist`, `desktop/src-tauri/target` and
@@ -36,6 +47,8 @@ PyInstaller before building the Tauri app. Generated files under
 - Inventory reference sync reusing the legacy read-only product, warehouse,
   location and price-list sync helpers with Brightpearl throttle handling.
 - Native source-file selection for CSV/XLSX inventory files.
+- Account-bound consolidated CSV exception reports containing every rejected
+  inventory row, while the UI keeps a bounded preview.
 - Inventory validation reusing the legacy enrichment path and staging into
   `validated_inventory`.
 - Synthetic local CSV import, DuckDB page preview, filter and sort for large-data
