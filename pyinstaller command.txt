@@ -1,0 +1,6 @@
+pyinstaller --onefile --windowed --add-data="C:/inventory_sync_tool/sage.png:." main.py
+
+pyinstaller --onefile --windowed --add-data="C:/inventory_sync_tool/sage.png:." --add-data="C:/inventory_sync_tool/brightpearl.png:." main.py
+
+proservmultitool@gmail.com
+Br1ghtpearl
