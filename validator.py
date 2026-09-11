@@ -150,25 +150,36 @@ def validate_and_enrich_inventory(csv_path, db_path, account_name, region=None, 
                 log(f"🛑 Cancel at row {idx}. Inserted so far: {inserted_count}.", log_callback)
                 break
 
-            sku = row["sku"].strip()
+            sku = row.get("sku", "").strip()
             warehouse_field = (row.get("warehouseId") or row.get("warehouseName") or row.get("warehouse") or "").strip()
             quantity = row.get("quantity", "").strip()
             costprice = row.get("costprice", "").strip()
             location_value = _get_location_value(row)
+
+            required_values = {
+                "sku": sku,
+                "quantity": quantity,
+                "locationName": location_value,
+                "costprice": costprice,
+                "warehouseId": warehouse_field,
+            }
+            missing_fields = [name for name, value in required_values.items() if not value]
+            if missing_fields:
+                missing_required_row.append(
+                    row_with_validation_error(row, [f"missing required fields: {', '.join(missing_fields)}"])
+                )
+                continue
 
             length_errors = product_field_length_errors(sku)
             if length_errors:
                 missing_required_row.append(row_with_validation_error(row, length_errors))
                 continue
 
-            if not sku or not warehouse_field:
-                continue
-
             parsed_quantity = _parse_decimal(quantity)
             parsed_costprice = _parse_decimal(costprice)
             if parsed_quantity is None or parsed_costprice is None:
                 missing_required_row.append(
-                    row_with_validation_error(row, "quantity and costprice must be finite numbers")
+                    row_with_validation_error(row, ["quantity and costprice must be finite numbers"])
                 )
                 continue
 

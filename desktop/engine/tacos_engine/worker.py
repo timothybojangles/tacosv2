@@ -22,6 +22,7 @@ import requests
 from brightpearl.common import Credentials, connect_sqlite, ensure_account_binding
 from brightpearl.inventory_import import update_product_catalogue
 from brightpearl.inventory_pricelists import sync_inventory_pricelists
+from brightpearl.settings import get_settings
 from brightpearl.warehouse_locations import update_location_catalogue
 from reference_data import fetch_and_store_reference_tables
 from validator import validate_and_enrich_inventory
@@ -452,6 +453,22 @@ def validate_inventory_file(store: Store, request_id: str, params: dict[str, Any
         if len(logs) > 100:
             del logs[: len(logs) - 100]
 
+    with legacy_cwd(store):
+        configured_exception_dir = Path(get_settings().unmatched_output_dir)
+        exception_dir = (
+            configured_exception_dir
+            if configured_exception_dir.is_absolute()
+            else store.root / configured_exception_dir
+        ).resolve()
+    exception_files = {
+        "missing_required": exception_dir / f"{account_name}_inventory_missing_required_row.csv",
+        "unmatched_sku": exception_dir / f"{account_name}_unmatched_skus.csv",
+        "non_stock_tracked": exception_dir / f"{account_name}_non_stock_tracked.csv",
+        "unmatched_location": exception_dir / f"{account_name}_unmatched_locations.csv",
+    }
+    for exception_file in exception_files.values():
+        exception_file.unlink(missing_ok=True)
+
     with legacy_operation(store):
         inserted = validate_and_enrich_inventory(
             str(path),
@@ -459,15 +476,53 @@ def validate_inventory_file(store: Store, request_id: str, params: dict[str, Any
             account_name,
             log_callback=worker_log,
         )
+    rejected, rejected_rows = inventory_rejection_preview(exception_files)
     counts = reference_counts(db_path)
-    update_job(store, request_id, kind="inventory_validation", state="succeeded", message=f"Validated {inserted} rows.")
+    update_job(
+        store,
+        request_id,
+        kind="inventory_validation",
+        state="succeeded" if rejected == 0 else "succeeded_with_warnings",
+        message=f"Accepted {inserted} rows; rejected {rejected} rows.",
+    )
     return {
         "inserted": inserted,
+        "rejected": rejected,
+        "totalRows": inserted + rejected,
         "account": account_summary(store, account_name),
         "referenceCounts": counts,
         "logs": logs,
         "validatedPreview": validated_inventory_preview(db_path),
+        "rejectedPreview": rejected_rows,
     }
+
+
+def inventory_rejection_preview(exception_files: dict[str, Path], limit: int = 100) -> tuple[int, list[dict[str, Any]]]:
+    reasons = {
+        "missing_required": "Missing or invalid required value",
+        "unmatched_sku": "SKU was not found in the synced product catalogue",
+        "non_stock_tracked": "Product is not stock tracked",
+        "unmatched_location": "Warehouse or location was not found in synced references",
+    }
+    rejected_count = 0
+    rejected: list[dict[str, Any]] = []
+    for category, path in exception_files.items():
+        if not path.exists():
+            continue
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            for row in csv.DictReader(handle):
+                rejected_count += 1
+                if len(rejected) >= limit:
+                    continue
+                validation_error = row.pop("validation_error", "").strip()
+                rejected.append(
+                    {
+                        "category": category,
+                        "reason": validation_error or reasons[category],
+                        **row,
+                    }
+                )
+    return rejected_count, rejected
 
 
 def validated_inventory_preview(db_path: Path, limit: int = 50) -> list[dict[str, Any]]:

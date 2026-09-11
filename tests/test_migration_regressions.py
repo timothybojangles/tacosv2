@@ -86,6 +86,28 @@ def test_malformed_inventory_numbers_are_rejected(tmp_path, inventory_db, quanti
     assert run_inventory_validation(tmp_path, inventory_db, quantity, cost) == 0
 
 
+def test_missing_inventory_fields_are_reported(tmp_path, inventory_db):
+    source = tmp_path / "stock.csv"
+    with source.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["sku", "warehouseId", "locationName", "quantity", "costprice"],
+        )
+        writer.writeheader()
+        writer.writerow(
+            dict(sku="TEST-001", warehouseId="1", locationName="", quantity="3", costprice="2.50")
+        )
+    errors = tmp_path / "errors"
+    with patch.object(validator, "log"), patch.object(
+        validator, "get_settings", return_value=SimpleNamespace(unmatched_output_dir=str(errors))
+    ):
+        assert validator.validate_and_enrich_inventory(str(source), str(inventory_db), "synthetic") == 0
+
+    with (errors / "synthetic_inventory_missing_required_row.csv").open(encoding="utf-8") as handle:
+        rejected = list(csv.DictReader(handle))
+    assert rejected[0]["validation_error"] == "missing required fields: locationName"
+
+
 @pytest.mark.legacy_gap
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason="SO-001: retry after payment failure recreates confirmed order")
 def test_saved_order_id_prevents_second_order_creation():

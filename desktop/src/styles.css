@@ -299,6 +299,56 @@ dd {
   background: #fff;
 }
 
+.resultHeader,
+.resultCounts,
+.resultTabs {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.resultHeader {
+  justify-content: space-between;
+}
+
+.resultHeader p {
+  color: #64748b;
+  margin-bottom: 0;
+}
+
+.resultCounts span {
+  padding: 8px 10px;
+  border-radius: 8px;
+}
+
+.acceptedCount {
+  color: #23634d;
+  background: #e7f1ec;
+}
+
+.rejectedCount {
+  color: #9f1d1d;
+  background: #fff1f0;
+}
+
+.resultTabs {
+  border-bottom: 1px solid #d9e1e8;
+}
+
+.resultTabs button {
+  border: 0;
+  border-bottom: 3px solid transparent;
+  padding: 8px 12px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.resultTabs button.active {
+  border-bottom-color: #23634d;
+  color: #23634d;
+  font-weight: 700;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;

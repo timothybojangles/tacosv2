@@ -148,3 +148,58 @@ def test_inventory_reference_sync_calls_inventory_specific_legacy_steps(tmp_path
     refs.assert_called_once()
     locations.assert_called_once()
     prices.assert_called_once()
+
+
+def test_inventory_validation_returns_accepted_and_rejected_rows(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("TACOS_CREDENTIAL_BACKEND", "sqlite_plaintext")
+    monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))
+    store = app_store()
+    handle(
+        store,
+        _request(
+            "saveAccount",
+            {"accountName": "demo", "appRef": "app", "token": "secret", "region": "euw1"},
+            "save-1",
+        ),
+    )
+    capsys.readouterr()
+
+    db_path = worker.account_data_db(store, "demo")
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE product_catalogue (productId INTEGER, SKU TEXT, stockTracked INTEGER);
+            INSERT INTO product_catalogue VALUES (101, 'GOOD-SKU', 1);
+            CREATE TABLE ref_warehouses (warehouseId INTEGER, name TEXT);
+            INSERT INTO ref_warehouses VALUES (1, 'Main');
+            CREATE TABLE ref_locations (
+                locationId INTEGER, warehouseId INTEGER, zoneId INTEGER,
+                groupingA TEXT, groupingB TEXT, groupingC TEXT, groupingD TEXT, barcode TEXT
+            );
+            INSERT INTO ref_locations VALUES (10, 1, NULL, 'A', NULL, NULL, NULL, NULL);
+            """
+        )
+
+    source = tmp_path / "inventory.csv"
+    source.write_text(
+        "sku,quantity,locationName,costprice,warehouseId\n"
+        "GOOD-SKU,2,A,1.50,1\n"
+        "BAD-SKU,3,A,2.00,1\n",
+        encoding="utf-8",
+    )
+    handle(
+        store,
+        _request(
+            "validateInventoryFile",
+            {"accountName": "demo", "path": str(source)},
+            "validate-1",
+        ),
+    )
+
+    result = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
+    assert result["inserted"] == 1
+    assert result["rejected"] == 1
+    assert result["totalRows"] == 2
+    assert result["validatedPreview"][0]["sku"] == "GOOD-SKU"
+    assert result["rejectedPreview"][0]["sku"] == "BAD-SKU"
+    assert result["rejectedPreview"][0]["category"] == "unmatched_sku"

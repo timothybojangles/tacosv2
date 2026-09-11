@@ -11,10 +11,8 @@ import {
   KeyRound,
   Loader2,
   Lock,
-  Play,
   RefreshCw,
   Settings,
-  Table2,
   UploadCloud,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -43,7 +41,7 @@ type Account = {
   referenceCounts: ReferenceCounts;
 };
 
-type PreviewRow = Record<string, string | number | null>;
+type PreviewRow = Record<string, unknown>;
 
 const tabs = [
   { id: "accounts", label: "Accounts", icon: KeyRound },
@@ -95,12 +93,8 @@ export default function App() {
     region: "euw1" as "euw1" | "use1",
   });
   const [sourcePath, setSourcePath] = useState("");
-  const [datasetId, setDatasetId] = useState("");
-  const [filter, setFilter] = useState("");
-  const [sortKey, setSortKey] = useState("");
-  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [validation, setValidation] = useState<any>(null);
-  const [preview, setPreview] = useState<{ totalRows: number; rows: PreviewRow[] } | null>(null);
+  const [resultView, setResultView] = useState<"accepted" | "rejected">("accepted");
   const [jobs, setJobs] = useState<any[]>([]);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -110,7 +104,9 @@ export default function App() {
   const counts = activeAccount?.referenceCounts || emptyCounts();
   const hasReferences = counts.products > 0 && counts.warehouses > 0 && counts.locations > 0;
 
-  const tableRows = (validation?.validatedPreview || preview?.rows || []) as PreviewRow[];
+  const tableRows = (
+    resultView === "accepted" ? validation?.validatedPreview : validation?.rejectedPreview
+  ) as PreviewRow[] || [];
   const columns = useMemo(() => {
     const row = tableRows[0];
     return row ? Object.keys(row) : [];
@@ -184,29 +180,10 @@ export default function App() {
     await run("validateSource", async () => {
       const result = await engine("validateInventoryFile", { accountName: activeAccountName, path: sourcePath });
       setValidation(result);
-      setPreview(null);
+      setResultView(result.inserted > 0 ? "accepted" : "rejected");
       await refreshAccounts(result.account.accountName);
       setActiveTab("data");
-      setMessage(`Validated ${result.inserted} inventory row(s) for ${activeAccountName}.`);
-    });
-  }
-
-  async function runSyntheticImport() {
-    await run("syntheticImport", async () => {
-      const result = await engine("importSyntheticCsv", { path: sourcePath });
-      setDatasetId(result.datasetId);
-      const page = await engine("previewDataset", { datasetId: result.datasetId, pageSize: 50 });
-      setPreview(page);
-      setValidation(null);
-      setActiveTab("data");
-    });
-  }
-
-  async function refreshPreview() {
-    if (!datasetId) return;
-    await run("preview", async () => {
-      setPreview(await engine("previewDataset", { datasetId, pageSize: 50, filter, sortKey, sortDir }));
-      setValidation(null);
+      setMessage(`Validation complete: ${result.inserted} accepted, ${result.rejected} rejected for ${activeAccountName}.`);
     });
   }
 
@@ -375,24 +352,24 @@ export default function App() {
 
         {activeTab === "data" && (
           <section className="panel">
-            <div className="toolbar">
-              <Table2 size={18} />
-              <input value={datasetId} onChange={(event) => setDatasetId(event.target.value)} placeholder="Synthetic dataset id" />
-              <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Filter synthetic rows" />
-              <input value={sortKey} onChange={(event) => setSortKey(event.target.value)} placeholder="Sort column" />
-              <select value={sortDir} onChange={(event) => setSortDir(event.target.value as "asc" | "desc")}>
-                <option value="asc">Ascending</option>
-                <option value="desc">Descending</option>
-              </select>
-              <button onClick={refreshPreview} disabled={!!busy || !datasetId}>
-                <RefreshCw size={18} />
-                Refresh synthetic
-              </button>
-              <button onClick={runSyntheticImport} disabled={!!busy || !sourcePath}>
-                <Play size={18} />
-                Synthetic preview
-              </button>
+            <div className="resultHeader">
+              <div>
+                <h2>Inventory validation results</h2>
+                <p>{validation ? `${validation.totalRows} source row(s) checked against ${activeAccountName}'s synced references.` : "Validate an inventory source to see accepted and rejected rows."}</p>
+              </div>
+              {validation && (
+                <div className="resultCounts">
+                  <span className="acceptedCount">Accepted <strong>{validation.inserted}</strong></span>
+                  <span className="rejectedCount">Rejected <strong>{validation.rejected}</strong></span>
+                </div>
+              )}
             </div>
+            {validation && (
+              <div className="resultTabs" role="tablist" aria-label="Validation result rows">
+                <button className={resultView === "accepted" ? "active" : ""} onClick={() => setResultView("accepted")}>Accepted</button>
+                <button className={resultView === "rejected" ? "active" : ""} onClick={() => setResultView("rejected")}>Rejected</button>
+              </div>
+            )}
             <div className="tableWrap">
               <table>
                 <thead>
@@ -406,9 +383,10 @@ export default function App() {
                   ))}
                 </tbody>
               </table>
-              {!preview && !validation && <p className="empty">Validate an inventory source or import a synthetic CSV preview.</p>}
+              {!validation && <p className="empty">No validation results yet.</p>}
+              {validation && !tableRows.length && <p className="empty">No {resultView} rows.</p>}
             </div>
-            {preview && <p className="meta">{preview.totalRows} matching synthetic rows, first page shown.</p>}
+            {validation && <p className="meta">Showing up to 50 accepted rows and 100 rejected rows.</p>}
           </section>
         )}
 
