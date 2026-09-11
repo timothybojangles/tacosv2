@@ -300,10 +300,6 @@ export default function App() {
                   {busy === "validateAccount" ? <Loader2 className="spin" size={18} /> : <CheckCircle2 size={18} />}
                   Check credentials
                 </button>
-                <button onClick={syncReferences} disabled={!!busy || !activeAccountName}>
-                  {busy === "syncReferences" ? <Loader2 className="spin" size={18} /> : <RefreshCw size={18} />}
-                  Sync inventory references
-                </button>
               </div>
             </div>
             <div className="accountSnapshot">

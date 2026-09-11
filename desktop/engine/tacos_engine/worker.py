@@ -40,6 +40,16 @@ class WorkerError(Exception):
         self.message = message
 
 
+class _DiscardLegacyOutput:
+    """Keep legacy console logging away from the JSON protocol stream."""
+
+    def write(self, value: str) -> int:
+        return len(value)
+
+    def flush(self) -> None:
+        return None
+
+
 @dataclass
 class Store:
     root: Path
@@ -118,6 +128,12 @@ def legacy_cwd(store: Store):
         yield
     finally:
         os.chdir(previous)
+
+
+@contextlib.contextmanager
+def legacy_operation(store: Store):
+    with legacy_cwd(store), contextlib.redirect_stdout(_DiscardLegacyOutput()):
+        yield
 
 
 def upsert_account_metadata(
@@ -382,7 +398,7 @@ def sync_inventory_references(store: Store, request_id: str, params: dict[str, A
             del logs[: len(logs) - 100]
         emit_event(request_id, "progress", {"message": str(message)})
 
-    with legacy_cwd(store):
+    with legacy_operation(store):
         product_count = update_product_catalogue(
             account_name, str(db_path), log_callback=worker_log
         )
@@ -436,7 +452,7 @@ def validate_inventory_file(store: Store, request_id: str, params: dict[str, Any
         if len(logs) > 100:
             del logs[: len(logs) - 100]
 
-    with legacy_cwd(store):
+    with legacy_operation(store):
         inserted = validate_and_enrich_inventory(
             str(path),
             str(db_path),
@@ -469,7 +485,8 @@ def validated_inventory_preview(db_path: Path, limit: int = 50) -> list[dict[str
 
 
 def output(payload: dict[str, Any]) -> None:
-    line = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+    # Protocol frames stay ASCII-safe even when Windows inherits a legacy code page.
+    line = json.dumps(payload, separators=(",", ":"), ensure_ascii=True)
     if len(line.encode("utf-8")) > MAX_MESSAGE_BYTES:
         line = json.dumps(
             {

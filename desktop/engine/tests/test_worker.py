@@ -116,15 +116,27 @@ def test_inventory_reference_sync_calls_inventory_specific_legacy_steps(tmp_path
     capsys.readouterr()
 
     with (
-        patch.object(worker, "update_product_catalogue", return_value=2) as products,
+        patch.object(
+            worker,
+            "update_product_catalogue",
+            side_effect=lambda *args, **kwargs: (
+                print("✅ products"),
+                kwargs["log_callback"]("✅ products"),
+                2,
+            )[2],
+        ) as products,
         patch.object(worker, "fetch_and_store_reference_tables", return_value={"warehouses": 1}) as refs,
         patch.object(worker, "update_location_catalogue", return_value=3) as locations,
         patch.object(worker, "sync_inventory_pricelists", return_value={"price_lists": 4, "price_list_values": 5}) as prices,
     ):
         handle(store, _request("syncInventoryReferences", {"accountName": "demo"}, "sync-1"))
 
-    result = json.loads(capsys.readouterr().out.splitlines()[-1])
+    captured = capsys.readouterr().out
+    assert "✅ products" not in captured
+    assert "\\u2705 products" in captured
+    result = json.loads(captured.splitlines()[-1])
     assert result["ok"] is True
+    assert result["result"]["logs"] == ["✅ products"]
     assert result["result"]["results"] == {
         "products": 2,
         "warehouses": 1,
