@@ -59,8 +59,6 @@ def test_named_inventory_location_resolves_in_selected_warehouse(inventory_db):
         assert validator._lookup_location_id(conn.cursor(), 2, "A") is None
 
 
-@pytest.mark.legacy_gap
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="INV-001: numeric location bypasses reference validation")
 @pytest.mark.parametrize("location", ["999", "20"])
 def test_numeric_location_requires_existence_and_warehouse(inventory_db, location):
     with sqlite3.connect(inventory_db) as conn:
@@ -83,8 +81,6 @@ def test_well_formed_inventory_row_is_accepted(tmp_path, inventory_db):
     assert run_inventory_validation(tmp_path, inventory_db, "3", "2.50") == 1
 
 
-@pytest.mark.legacy_gap
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="INV-002: malformed numeric values reach validated table")
 @pytest.mark.parametrize("quantity,cost", [("not-a-number", "2.50"), ("3", "not-a-number")])
 def test_malformed_inventory_numbers_are_rejected(tmp_path, inventory_db, quantity, cost):
     assert run_inventory_validation(tmp_path, inventory_db, quantity, cost) == 0

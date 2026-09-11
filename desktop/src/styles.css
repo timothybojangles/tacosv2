@@ -66,6 +66,7 @@ header p,
 nav {
   display: grid;
   gap: 4px;
+  margin-top: 18px;
 }
 
 nav button,
@@ -96,6 +97,18 @@ nav button:hover {
 .workspace {
   padding: 28px;
   min-width: 0;
+}
+
+.sideLabel {
+  color: #b8c2cc;
+  font-size: 13px;
+  margin: 0 8px 6px;
+}
+
+.sidebar select {
+  width: calc(100% - 16px);
+  margin: 0 8px;
+  color: #1f2933;
 }
 
 header {
@@ -148,6 +161,34 @@ h2 {
   gap: 14px;
 }
 
+.accountPanel {
+  grid-template-columns: minmax(320px, 1.3fr) minmax(280px, 0.7fr);
+  align-items: start;
+}
+
+.formGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(220px, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.formGrid label {
+  margin: 0;
+}
+
+.formGrid input,
+.formGrid select {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+}
+
+.accountSnapshot {
+  border-left: 1px solid #d9e1e8;
+  padding-left: 18px;
+}
+
 .step,
 .panel {
   background: #fff;
@@ -184,6 +225,19 @@ label {
   gap: 8px;
   align-items: center;
   flex-wrap: wrap;
+}
+
+.counts {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 14px;
+  font-size: 13px;
+}
+
+.counts span {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 input,
@@ -303,8 +357,14 @@ code {
   }
 
   .taskFlow,
-  .settingsGrid {
+  .settingsGrid,
+  .accountPanel,
+  .formGrid {
     grid-template-columns: 1fr;
   }
-}
 
+  .accountSnapshot {
+    border-left: 0;
+    padding-left: 0;
+  }
+}

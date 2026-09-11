@@ -1,9 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import {
   AlertTriangle,
+  CheckCircle2,
   Database,
+  FileSearch,
   FileSpreadsheet,
+  FolderOpen,
   History,
+  KeyRound,
   Loader2,
   Lock,
   Play,
@@ -12,20 +17,43 @@ import {
   Table2,
   UploadCloud,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 type WorkerResponse =
   | { ok: true; result: any }
   | { ok: false; error: { code: string; message: string } };
 
+type ReferenceCounts = {
+  products: number;
+  warehouses: number;
+  locations: number;
+  priceLists: number;
+  priceListValues: number;
+  validatedInventory: number;
+};
+
+type Account = {
+  accountName: string;
+  region: "euw1" | "use1";
+  baseCurrency?: string;
+  credentialStatus: string;
+  lastValidatedAt?: number;
+  lastReferenceSyncAt?: number;
+  dataDbPath: string;
+  referenceCounts: ReferenceCounts;
+};
+
 type PreviewRow = Record<string, string | number | null>;
 
 const tabs = [
-  { id: "tasks", label: "Tasks", icon: FileSpreadsheet },
+  { id: "accounts", label: "Accounts", icon: KeyRound },
+  { id: "tasks", label: "Inventory", icon: FileSpreadsheet },
   { id: "data", label: "Data", icon: Database },
   { id: "history", label: "Job History", icon: History },
   { id: "settings", label: "Settings", icon: Settings },
 ];
+
+const inventoryHeaders = ["sku", "quantity", "locationName", "costprice", "warehouseId"];
 
 function requestId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.round(Math.random() * 100000)}`;
@@ -36,70 +64,157 @@ async function engine(method: string, params: Record<string, unknown> = {}) {
     request: { protocolVersion: 1, id: requestId(method), method, params },
   })) as WorkerResponse;
   if (!response.ok) {
-    throw new Error(response.error.message);
+    throw new Error(response.error?.message || "Worker request failed");
   }
   return response.result;
 }
 
+function formatTime(value?: number) {
+  return value ? new Date(value * 1000).toLocaleString() : "Not yet";
+}
+
+function emptyCounts(): ReferenceCounts {
+  return {
+    products: 0,
+    warehouses: 0,
+    locations: 0,
+    priceLists: 0,
+    priceListValues: 0,
+    validatedInventory: 0,
+  };
+}
+
 export default function App() {
-  const [activeTab, setActiveTab] = useState("tasks");
+  const [activeTab, setActiveTab] = useState("accounts");
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [activeAccountName, setActiveAccountName] = useState("");
+  const [form, setForm] = useState({
+    accountName: "",
+    appRef: "",
+    token: "",
+    region: "euw1" as "euw1" | "use1",
+  });
   const [sourcePath, setSourcePath] = useState("");
   const [datasetId, setDatasetId] = useState("");
   const [filter, setFilter] = useState("");
   const [sortKey, setSortKey] = useState("");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
-  const [importResult, setImportResult] = useState<any>(null);
+  const [validation, setValidation] = useState<any>(null);
   const [preview, setPreview] = useState<{ totalRows: number; rows: PreviewRow[] } | null>(null);
   const [jobs, setJobs] = useState<any[]>([]);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
 
+  const activeAccount = accounts.find((account) => account.accountName === activeAccountName) || null;
+  const counts = activeAccount?.referenceCounts || emptyCounts();
+  const hasReferences = counts.products > 0 && counts.warehouses > 0 && counts.locations > 0;
+
+  const tableRows = (validation?.validatedPreview || preview?.rows || []) as PreviewRow[];
   const columns = useMemo(() => {
-    const row = preview?.rows?.[0];
+    const row = tableRows[0];
     return row ? Object.keys(row) : [];
-  }, [preview]);
+  }, [tableRows]);
 
-  async function runImport() {
-    setBusy(true);
+  useEffect(() => {
+    void refreshAccounts();
+  }, []);
+
+  async function run(label: string, action: () => Promise<void>) {
+    setBusy(label);
     setError("");
+    setMessage("");
     try {
+      await action();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Action failed");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function refreshAccounts(selectName?: string) {
+    const result = await engine("listAccounts");
+    const loaded = result.accounts as Account[];
+    setAccounts(loaded);
+    const next = selectName || activeAccountName || loaded[0]?.accountName || "";
+    setActiveAccountName(next);
+  }
+
+  async function saveAccount() {
+    await run("saveAccount", async () => {
+      const result = await engine("saveAccount", form);
+      await refreshAccounts(result.account.accountName);
+      setMessage("Account saved locally. Credentials are stored outside the repository.");
+    });
+  }
+
+  async function validateAccount() {
+    if (!activeAccountName) return;
+    await run("validateAccount", async () => {
+      const result = await engine("validateAccount", { accountName: activeAccountName });
+      await refreshAccounts(result.account.accountName);
+      setMessage(`Credentials verified. Base currency: ${result.baseCurrency || "not returned"}.`);
+    });
+  }
+
+  async function syncReferences() {
+    if (!activeAccountName) return;
+    await run("syncReferences", async () => {
+      const result = await engine("syncInventoryReferences", { accountName: activeAccountName });
+      await refreshAccounts(result.account.accountName);
+      setMessage(
+        `Synced products ${result.results.products}, warehouses ${result.results.warehouses}, locations ${result.results.locations}, price values ${result.results.priceListValues}.`
+      );
+    });
+  }
+
+  async function chooseSource() {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "Inventory source", extensions: ["csv", "xlsx"] }],
+    });
+    if (typeof selected === "string") {
+      setSourcePath(selected);
+    }
+  }
+
+  async function validateSource() {
+    if (!activeAccountName || !sourcePath) return;
+    await run("validateSource", async () => {
+      const result = await engine("validateInventoryFile", { accountName: activeAccountName, path: sourcePath });
+      setValidation(result);
+      setPreview(null);
+      await refreshAccounts(result.account.accountName);
+      setActiveTab("data");
+      setMessage(`Validated ${result.inserted} inventory row(s) for ${activeAccountName}.`);
+    });
+  }
+
+  async function runSyntheticImport() {
+    await run("syntheticImport", async () => {
       const result = await engine("importSyntheticCsv", { path: sourcePath });
-      setImportResult(result);
       setDatasetId(result.datasetId);
       const page = await engine("previewDataset", { datasetId: result.datasetId, pageSize: 50 });
       setPreview(page);
+      setValidation(null);
       setActiveTab("data");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Import failed");
-    } finally {
-      setBusy(false);
-    }
+    });
   }
 
   async function refreshPreview() {
     if (!datasetId) return;
-    setBusy(true);
-    setError("");
-    try {
+    await run("preview", async () => {
       setPreview(await engine("previewDataset", { datasetId, pageSize: 50, filter, sortKey, sortDir }));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Preview failed");
-    } finally {
-      setBusy(false);
-    }
+      setValidation(null);
+    });
   }
 
   async function refreshHistory() {
-    setBusy(true);
-    setError("");
-    try {
+    await run("history", async () => {
       const result = await engine("jobHistory");
       setJobs(result.jobs);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load job history");
-    } finally {
-      setBusy(false);
-    }
+    });
   }
 
   return (
@@ -109,9 +224,16 @@ export default function App() {
           <span className="brandMark">T</span>
           <div>
             <strong>TACOS</strong>
-            <span>Installed prototype</span>
+            <span>Inventory prototype</span>
           </div>
         </div>
+        <label className="sideLabel" htmlFor="activeAccount">Active account</label>
+        <select id="activeAccount" value={activeAccountName} onChange={(event) => setActiveAccountName(event.target.value)}>
+          <option value="">No account</option>
+          {accounts.map((account) => (
+            <option key={account.accountName} value={account.accountName}>{account.accountName}</option>
+          ))}
+        </select>
         <nav>
           {tabs.map((tab) => {
             const Icon = tab.icon;
@@ -136,60 +258,122 @@ export default function App() {
         <header>
           <div>
             <h1>Inventory Import</h1>
-            <p>Local CSV pilot with private Python worker, SQLite ledger, and DuckDB paging.</p>
+            <p>Account-bound Brightpearl read sync, local validation and disabled write path.</p>
           </div>
-          <span className="account"><Lock size={14} /> Local only</span>
+          <span className="account"><Lock size={14} /> {activeAccountName || "No active account"}</span>
         </header>
 
-        {error && (
-          <div className="notice error">
-            <AlertTriangle size={18} />
-            {error}
-          </div>
+        {error && <div className="notice error"><AlertTriangle size={18} />{error}</div>}
+        {message && <div className="notice"><CheckCircle2 size={18} />{message}</div>}
+
+        {activeTab === "accounts" && (
+          <section className="panel accountPanel">
+            <div>
+              <h2>Register Brightpearl Account</h2>
+              <div className="formGrid">
+                <label>
+                  Account name
+                  <input value={form.accountName} onChange={(event) => setForm({ ...form, accountName: event.target.value })} />
+                </label>
+                <label>
+                  Region
+                  <select value={form.region} onChange={(event) => setForm({ ...form, region: event.target.value as "euw1" | "use1" })}>
+                    <option value="euw1">euw1</option>
+                    <option value="use1">use1</option>
+                  </select>
+                </label>
+                <label>
+                  App ref
+                  <input value={form.appRef} onChange={(event) => setForm({ ...form, appRef: event.target.value })} />
+                </label>
+                <label>
+                  Account token
+                  <input type="password" value={form.token} onChange={(event) => setForm({ ...form, token: event.target.value })} />
+                </label>
+              </div>
+              <div className="toolbar">
+                <button onClick={saveAccount} disabled={!!busy}>
+                  {busy === "saveAccount" ? <Loader2 className="spin" size={18} /> : <KeyRound size={18} />}
+                  Save account
+                </button>
+                <button onClick={validateAccount} disabled={!!busy || !activeAccountName}>
+                  {busy === "validateAccount" ? <Loader2 className="spin" size={18} /> : <CheckCircle2 size={18} />}
+                  Check credentials
+                </button>
+                <button onClick={syncReferences} disabled={!!busy || !activeAccountName}>
+                  {busy === "syncReferences" ? <Loader2 className="spin" size={18} /> : <RefreshCw size={18} />}
+                  Sync inventory references
+                </button>
+              </div>
+            </div>
+            <div className="accountSnapshot">
+              <h2>Active Account Status</h2>
+              <dl>
+                <dt>Account</dt><dd>{activeAccount?.accountName || "None"}</dd>
+                <dt>Region</dt><dd>{activeAccount?.region || "-"}</dd>
+                <dt>Credential</dt><dd>{activeAccount?.credentialStatus || "-"}</dd>
+                <dt>Base currency</dt><dd>{activeAccount?.baseCurrency || "-"}</dd>
+                <dt>Credential check</dt><dd>{formatTime(activeAccount?.lastValidatedAt)}</dd>
+                <dt>Reference sync</dt><dd>{formatTime(activeAccount?.lastReferenceSyncAt)}</dd>
+              </dl>
+            </div>
+          </section>
         )}
 
         {activeTab === "tasks" && (
           <div className="taskFlow">
-            {["Source", "Mapping", "Validation", "Preview", "Run", "Results"].map((step, index) => (
-              <section className="step" key={step}>
-                <div className="stepIndex">{index + 1}</div>
-                <h2>{step}</h2>
-                {index === 0 && (
-                  <>
-                    <label htmlFor="sourcePath">Local synthetic CSV path</label>
-                    <div className="sourceRow">
-                      <input
-                        id="sourcePath"
-                        value={sourcePath}
-                        onChange={(event) => setSourcePath(event.target.value)}
-                        placeholder="C:\\data\\synthetic-inventory.csv"
-                      />
-                      <button onClick={runImport} disabled={busy || !sourcePath.trim()}>
-                        {busy ? <Loader2 className="spin" size={18} /> : <Play size={18} />}
-                        Import
-                      </button>
-                    </div>
-                  </>
-                )}
-                {index === 1 && <p>Saved mapping controls are stubbed for the phase-1 prototype.</p>}
-                {index === 2 && <p>Malformed CSV rows are retained as source warnings, not discarded.</p>}
-                {index === 3 && <p>{datasetId ? `Dataset ${datasetId} is ready for local preview.` : "Import a source file to enable preview."}</p>}
-                {index === 4 && (
-                  <button className="disabledAction" disabled>
-                    <UploadCloud size={18} />
-                    Brightpearl writes disabled
-                  </button>
-                )}
-                {index === 5 && importResult && (
-                  <dl>
-                    <dt>Rows read</dt>
-                    <dd>{importResult.rowsRead}</dd>
-                    <dt>Warnings</dt>
-                    <dd>{importResult.warningCount}</dd>
-                  </dl>
-                )}
-              </section>
-            ))}
+            <section className="step">
+              <div className="stepIndex">1</div>
+              <h2>Account</h2>
+              <p>{activeAccount ? `${activeAccount.accountName} is selected.` : "Register and select an account first."}</p>
+            </section>
+            <section className="step">
+              <div className="stepIndex">2</div>
+              <h2>References</h2>
+              <div className="counts">
+                {Object.entries(counts).map(([key, value]) => (
+                  <span key={key}>{key}: <strong>{value}</strong></span>
+                ))}
+              </div>
+              <button onClick={syncReferences} disabled={!!busy || !activeAccountName}>
+                {busy === "syncReferences" ? <Loader2 className="spin" size={18} /> : <RefreshCw size={18} />}
+                Sync required data
+              </button>
+            </section>
+            <section className="step">
+              <div className="stepIndex">3</div>
+              <h2>Source</h2>
+              <p>Expected columns: {inventoryHeaders.join(", ")}.</p>
+              <div className="sourceRow">
+                <input value={sourcePath} onChange={(event) => setSourcePath(event.target.value)} placeholder="Choose CSV/XLSX source" />
+                <button onClick={chooseSource}>
+                  <FolderOpen size={18} />
+                  Select
+                </button>
+              </div>
+            </section>
+            <section className="step">
+              <div className="stepIndex">4</div>
+              <h2>Validate</h2>
+              <p>{hasReferences ? "References are available for local enrichment." : "Sync products, warehouses and locations before validation."}</p>
+              <button onClick={validateSource} disabled={!!busy || !activeAccountName || !sourcePath || !hasReferences}>
+                {busy === "validateSource" ? <Loader2 className="spin" size={18} /> : <FileSearch size={18} />}
+                Validate source
+              </button>
+            </section>
+            <section className="step">
+              <div className="stepIndex">5</div>
+              <h2>Preview</h2>
+              <p>{validation ? `${validation.inserted} row(s) staged in validated_inventory.` : "Validation preview appears after source validation."}</p>
+            </section>
+            <section className="step">
+              <div className="stepIndex">6</div>
+              <h2>Run</h2>
+              <button className="disabledAction" disabled>
+                <UploadCloud size={18} />
+                Brightpearl writes disabled
+              </button>
+            </section>
           </div>
         )}
 
@@ -197,16 +381,20 @@ export default function App() {
           <section className="panel">
             <div className="toolbar">
               <Table2 size={18} />
-              <input value={datasetId} onChange={(event) => setDatasetId(event.target.value)} placeholder="Dataset id" />
-              <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Filter rows" />
+              <input value={datasetId} onChange={(event) => setDatasetId(event.target.value)} placeholder="Synthetic dataset id" />
+              <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Filter synthetic rows" />
               <input value={sortKey} onChange={(event) => setSortKey(event.target.value)} placeholder="Sort column" />
               <select value={sortDir} onChange={(event) => setSortDir(event.target.value as "asc" | "desc")}>
                 <option value="asc">Ascending</option>
                 <option value="desc">Descending</option>
               </select>
-              <button onClick={refreshPreview} disabled={busy || !datasetId}>
+              <button onClick={refreshPreview} disabled={!!busy || !datasetId}>
                 <RefreshCw size={18} />
-                Refresh
+                Refresh synthetic
+              </button>
+              <button onClick={runSyntheticImport} disabled={!!busy || !sourcePath}>
+                <Play size={18} />
+                Synthetic preview
               </button>
             </div>
             <div className="tableWrap">
@@ -215,16 +403,16 @@ export default function App() {
                   <tr>{columns.map((column) => <th key={column}>{column}</th>)}</tr>
                 </thead>
                 <tbody>
-                  {preview?.rows.map((row, index) => (
-                    <tr key={`${row.rowNumber}-${index}`}>
+                  {tableRows.map((row, index) => (
+                    <tr key={`${row.rowNumber || row.sku}-${index}`}>
                       {columns.map((column) => <td key={column}>{String(row[column] ?? "")}</td>)}
                     </tr>
                   ))}
                 </tbody>
               </table>
-              {!preview && <p className="empty">Import a synthetic CSV to preview data.</p>}
+              {!preview && !validation && <p className="empty">Validate an inventory source or import a synthetic CSV preview.</p>}
             </div>
-            {preview && <p className="meta">{preview.totalRows} matching rows, first page shown.</p>}
+            {preview && <p className="meta">{preview.totalRows} matching synthetic rows, first page shown.</p>}
           </section>
         )}
 
@@ -232,7 +420,7 @@ export default function App() {
           <section className="panel">
             <div className="toolbar">
               <History size={18} />
-              <button onClick={refreshHistory} disabled={busy}>
+              <button onClick={refreshHistory} disabled={!!busy}>
                 <RefreshCw size={18} />
                 Refresh
               </button>
@@ -252,15 +440,15 @@ export default function App() {
           <section className="panel settingsGrid">
             <div>
               <h2>Storage</h2>
-              <p>Runtime databases, logs, temp files and credentials stay in local application storage.</p>
+              <p>Each account has its own local data database, bound by account name.</p>
             </div>
             <div>
-              <h2>Updates</h2>
-              <p>SharePoint distribution is manual download/run only; the app performs no Graph or hosted update checks.</p>
+              <h2>Credentials</h2>
+              <p>Windows builds store API credentials outside Git and outside synced folders.</p>
             </div>
             <div>
-              <h2>WebView2</h2>
-              <p>The installer must detect WebView2 and document Microsoft’s offline prerequisite option.</p>
+              <h2>Safety</h2>
+              <p>Reference sync uses Brightpearl reads; stock-correction writes remain disabled.</p>
             </div>
           </section>
         )}
@@ -268,4 +456,3 @@ export default function App() {
     </main>
   );
 }
-

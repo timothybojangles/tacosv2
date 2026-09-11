@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import csv
+import ctypes
+import ctypes.wintypes
+import contextlib
 import json
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -13,10 +17,20 @@ from pathlib import Path
 from typing import Any
 
 import duckdb
+import requests
+
+from brightpearl.common import Credentials, connect_sqlite, ensure_account_binding
+from brightpearl.inventory_import import update_product_catalogue
+from brightpearl.inventory_pricelists import sync_inventory_pricelists
+from brightpearl.warehouse_locations import update_location_catalogue
+from reference_data import fetch_and_store_reference_tables
+from validator import validate_and_enrich_inventory
 
 PROTOCOL_VERSION = 1
 MAX_MESSAGE_BYTES = 64 * 1024
 MAX_PAGE_SIZE = 500
+SUPPORTED_REGIONS = {"euw1", "use1"}
+INVENTORY_HEADERS = ["sku", "quantity", "locationName", "costprice", "warehouseId"]
 
 
 class WorkerError(Exception):
@@ -31,6 +45,7 @@ class Store:
     root: Path
     ledger: Path
     datasets: Path
+    accounts: Path
 
 
 cancelled: set[str] = set()
@@ -44,7 +59,9 @@ def app_store() -> Store:
     else:
         root = Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir())) / "TACOSv2"
     datasets = root / "datasets"
+    accounts = root / "accounts"
     datasets.mkdir(parents=True, exist_ok=True)
+    accounts.mkdir(parents=True, exist_ok=True)
     ledger = root / "jobs.sqlite"
     with sqlite3.connect(ledger) as conn:
         conn.execute(
@@ -61,7 +78,394 @@ def app_store() -> Store:
             )
             """
         )
-    return Store(root=root, ledger=ledger, datasets=datasets)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS accounts (
+                account_name TEXT PRIMARY KEY,
+                region TEXT NOT NULL,
+                base_currency TEXT,
+                last_validated_at REAL,
+                last_reference_sync_at REAL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+    return Store(root=root, ledger=ledger, datasets=datasets, accounts=accounts)
+
+
+def normalize_account_name(value: Any) -> str:
+    name = str(value or "").strip()
+    if not name or len(name) > 80 or not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+        raise WorkerError("invalid_account", "Account name must use letters, numbers, hyphens or underscores.")
+    return name
+
+
+def account_data_db(store: Store, account_name: str) -> Path:
+    safe = normalize_account_name(account_name)
+    folder = store.accounts / safe
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "brightpearl_data.sqlite"
+    ensure_account_binding(str(path), safe)
+    return path
+
+
+@contextlib.contextmanager
+def legacy_cwd(store: Store):
+    previous = Path.cwd()
+    store.root.mkdir(parents=True, exist_ok=True)
+    os.chdir(store.root)
+    try:
+        yield
+    finally:
+        os.chdir(previous)
+
+
+def upsert_account_metadata(
+    store: Store,
+    account_name: str,
+    region: str,
+    *,
+    base_currency: str | None = None,
+    validated: bool = False,
+    references_synced: bool = False,
+) -> dict[str, Any]:
+    now = time.time()
+    with sqlite3.connect(store.ledger) as conn:
+        conn.execute(
+            """
+            INSERT INTO accounts
+                (account_name, region, base_currency, last_validated_at, last_reference_sync_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(account_name) DO UPDATE SET
+                region = excluded.region,
+                base_currency = coalesce(excluded.base_currency, accounts.base_currency),
+                last_validated_at = coalesce(excluded.last_validated_at, accounts.last_validated_at),
+                last_reference_sync_at = coalesce(excluded.last_reference_sync_at, accounts.last_reference_sync_at),
+                updated_at = excluded.updated_at
+            """,
+            (
+                account_name,
+                region,
+                base_currency,
+                now if validated else None,
+                now if references_synced else None,
+                now,
+            ),
+        )
+    return account_summary(store, account_name)
+
+
+def account_summary(store: Store, account_name: str) -> dict[str, Any]:
+    with sqlite3.connect(store.ledger) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT account_name, region, base_currency, last_validated_at, last_reference_sync_at "
+            "FROM accounts WHERE account_name = ?",
+            (account_name,),
+        ).fetchone()
+    if not row:
+        raise WorkerError("account_missing", "Account is not registered.")
+    db_path = account_data_db(store, row["account_name"])
+    counts = reference_counts(db_path)
+    return {
+        "accountName": row["account_name"],
+        "region": row["region"],
+        "baseCurrency": row["base_currency"],
+        "lastValidatedAt": row["last_validated_at"],
+        "lastReferenceSyncAt": row["last_reference_sync_at"],
+        "credentialStatus": "saved" if read_credential(row["account_name"]) else "missing",
+        "dataDbPath": str(db_path),
+        "referenceCounts": counts,
+    }
+
+
+def reference_counts(db_path: Path) -> dict[str, int]:
+    tables = {
+        "products": "product_catalogue",
+        "warehouses": "ref_warehouses",
+        "locations": "ref_locations",
+        "priceLists": "ref_price_lists",
+        "priceListValues": "ref_price_list_values",
+        "validatedInventory": "validated_inventory",
+    }
+    result = {key: 0 for key in tables}
+    with sqlite3.connect(db_path) as conn:
+        for key, table in tables.items():
+            try:
+                result[key] = int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+            except sqlite3.OperationalError:
+                result[key] = 0
+    return result
+
+
+class CREDENTIAL(ctypes.Structure):
+    _fields_ = [
+        ("Flags", ctypes.wintypes.DWORD),
+        ("Type", ctypes.wintypes.DWORD),
+        ("TargetName", ctypes.wintypes.LPWSTR),
+        ("Comment", ctypes.wintypes.LPWSTR),
+        ("LastWritten", ctypes.wintypes.FILETIME),
+        ("CredentialBlobSize", ctypes.wintypes.DWORD),
+        ("CredentialBlob", ctypes.POINTER(ctypes.c_byte)),
+        ("Persist", ctypes.wintypes.DWORD),
+        ("AttributeCount", ctypes.wintypes.DWORD),
+        ("Attributes", ctypes.c_void_p),
+        ("TargetAlias", ctypes.wintypes.LPWSTR),
+        ("UserName", ctypes.wintypes.LPWSTR),
+    ]
+
+
+def credential_target(account_name: str) -> str:
+    return f"TACOSv2/Brightpearl/{normalize_account_name(account_name)}"
+
+
+def save_credential(account_name: str, app_ref: str, token: str) -> None:
+    payload = json.dumps({"appRef": app_ref, "token": token}, separators=(",", ":"))
+    if os.name != "nt" or os.environ.get("TACOS_CREDENTIAL_BACKEND") == "sqlite_plaintext":
+        store = app_store()
+        with sqlite3.connect(store.ledger) as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS dev_credentials "
+                "(account_name TEXT PRIMARY KEY, payload TEXT NOT NULL)"
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO dev_credentials VALUES (?, ?)",
+                (normalize_account_name(account_name), payload),
+            )
+        return
+
+    blob = payload.encode("utf-16-le")
+    credential = CREDENTIAL()
+    credential.Type = 1
+    credential.TargetName = credential_target(account_name)
+    credential.CredentialBlobSize = len(blob)
+    credential.CredentialBlob = ctypes.cast(ctypes.create_string_buffer(blob), ctypes.POINTER(ctypes.c_byte))
+    credential.Persist = 2
+    credential.UserName = normalize_account_name(account_name)
+    if not ctypes.windll.advapi32.CredWriteW(ctypes.byref(credential), 0):
+        raise WorkerError("credential_store_failed", "Could not save credentials to Windows Credential Manager.")
+
+
+def read_credential(account_name: str) -> Credentials | None:
+    account = normalize_account_name(account_name)
+    if os.name != "nt" or os.environ.get("TACOS_CREDENTIAL_BACKEND") == "sqlite_plaintext":
+        store = app_store()
+        with sqlite3.connect(store.ledger) as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS dev_credentials "
+                "(account_name TEXT PRIMARY KEY, payload TEXT NOT NULL)"
+            )
+            row = conn.execute("SELECT payload FROM dev_credentials WHERE account_name = ?", (account,)).fetchone()
+        if not row:
+            return None
+        payload = json.loads(row[0])
+        meta = account_summary_without_secret(store, account)
+        return Credentials(payload["appRef"], payload["token"], meta["region"])
+
+    pointer = ctypes.POINTER(CREDENTIAL)()
+    if not ctypes.windll.advapi32.CredReadW(credential_target(account), 1, 0, ctypes.byref(pointer)):
+        return None
+    try:
+        credential = pointer.contents
+        blob = ctypes.string_at(credential.CredentialBlob, credential.CredentialBlobSize)
+        payload = json.loads(blob.decode("utf-16-le"))
+        meta = account_summary_without_secret(app_store(), account)
+        return Credentials(payload["appRef"], payload["token"], meta["region"])
+    finally:
+        ctypes.windll.advapi32.CredFree(pointer)
+
+
+def account_summary_without_secret(store: Store, account_name: str) -> dict[str, Any]:
+    with sqlite3.connect(store.ledger) as conn:
+        row = conn.execute(
+            "SELECT region, base_currency FROM accounts WHERE account_name = ?",
+            (account_name,),
+        ).fetchone()
+    if not row:
+        raise WorkerError("account_missing", "Account is not registered.")
+    return {"region": row[0], "baseCurrency": row[1]}
+
+
+def prepare_legacy_credentials(store: Store, account_name: str, credentials: Credentials, base_currency: str | None) -> None:
+    with legacy_cwd(store):
+        db_dir = store.root / "db"
+        db_dir.mkdir(parents=True, exist_ok=True)
+        with connect_sqlite(str(db_dir / "credentials.db")) as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS credentials (
+                    account_name TEXT PRIMARY KEY,
+                    app_ref TEXT NOT NULL,
+                    token TEXT NOT NULL,
+                    region TEXT NOT NULL CHECK (region IN ('euw1','use1')),
+                    base_currency TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO credentials (account_name, app_ref, token, region, base_currency)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(account_name) DO UPDATE SET
+                    app_ref = excluded.app_ref,
+                    token = excluded.token,
+                    region = excluded.region,
+                    base_currency = excluded.base_currency
+                """,
+                (account_name, credentials.app_ref, credentials.token, credentials.region, base_currency),
+            )
+
+
+def list_accounts(store: Store) -> dict[str, Any]:
+    with sqlite3.connect(store.ledger) as conn:
+        rows = conn.execute("SELECT account_name FROM accounts ORDER BY account_name COLLATE NOCASE").fetchall()
+    return {"accounts": [account_summary(store, row[0]) for row in rows]}
+
+
+def save_account(store: Store, params: dict[str, Any]) -> dict[str, Any]:
+    account_name = normalize_account_name(params.get("accountName"))
+    region = str(params.get("region", "")).strip()
+    app_ref = str(params.get("appRef", "")).strip()
+    token = str(params.get("token", "")).strip()
+    if region not in SUPPORTED_REGIONS:
+        raise WorkerError("invalid_region", "Region must be euw1 or use1.")
+    if not app_ref or not token:
+        raise WorkerError("missing_credentials", "App ref and account token are required.")
+    upsert_account_metadata(store, account_name, region)
+    account_data_db(store, account_name)
+    save_credential(account_name, app_ref, token)
+    prepare_legacy_credentials(store, account_name, Credentials(app_ref, token, region), None)
+    return {"account": account_summary(store, account_name)}
+
+
+def credentials_for_account(store: Store, account_name: str) -> Credentials:
+    account = normalize_account_name(account_name)
+    credentials = read_credential(account)
+    if credentials is None:
+        raise WorkerError("credentials_missing", "Save Brightpearl credentials before syncing this account.")
+    meta = account_summary_without_secret(store, account)
+    return Credentials(credentials.app_ref, credentials.token, meta["region"])
+
+
+def validate_account(store: Store, params: dict[str, Any]) -> dict[str, Any]:
+    account_name = normalize_account_name(params.get("accountName"))
+    credentials = credentials_for_account(store, account_name)
+    url = (
+        f"https://{credentials.region}.brightpearlconnect.com/public-api/{account_name}/"
+        "integration-service/account-configuration"
+    )
+    try:
+        response = requests.get(url, headers=credentials.headers, verify=False, timeout=30)
+        response.raise_for_status()
+        payload = response.json().get("response", {})
+    except requests.RequestException as exc:
+        raise WorkerError("credential_check_failed", f"Brightpearl credential check failed: {exc}") from exc
+    configuration = payload.get("configuration", payload) if isinstance(payload, dict) else {}
+    base_currency = configuration.get("baseCurrencyCode") if isinstance(configuration, dict) else None
+    account = upsert_account_metadata(store, account_name, credentials.region, base_currency=base_currency, validated=True)
+    prepare_legacy_credentials(store, account_name, credentials, base_currency)
+    return {"account": account, "baseCurrency": base_currency}
+
+
+def sync_inventory_references(store: Store, request_id: str, params: dict[str, Any]) -> dict[str, Any]:
+    account_name = normalize_account_name(params.get("accountName"))
+    credentials = credentials_for_account(store, account_name)
+    db_path = account_data_db(store, account_name)
+    base_currency = account_summary_without_secret(store, account_name).get("baseCurrency")
+    prepare_legacy_credentials(store, account_name, credentials, base_currency)
+    update_job(store, request_id, kind="reference_sync", state="running", source_path=account_name)
+    logs: list[str] = []
+
+    def worker_log(message: str) -> None:
+        logs.append(str(message))
+        if len(logs) > 100:
+            del logs[: len(logs) - 100]
+        emit_event(request_id, "progress", {"message": str(message)})
+
+    with legacy_cwd(store):
+        product_count = update_product_catalogue(
+            account_name, str(db_path), log_callback=worker_log
+        )
+        warehouse_result = fetch_and_store_reference_tables(
+            account_name,
+            credentials.region,
+            credentials.headers,
+            str(db_path),
+            reference_keys=("warehouses",),
+            log_callback=worker_log,
+        )
+        location_count = update_location_catalogue(account_name, str(db_path), log_callback=worker_log)
+        pricelist_result = sync_inventory_pricelists(account_name, str(db_path), log_callback=worker_log)
+
+    update_job(store, request_id, kind="reference_sync", state="succeeded", message="Inventory references synced.")
+    account = upsert_account_metadata(
+        store,
+        account_name,
+        credentials.region,
+        base_currency=account_summary_without_secret(store, account_name).get("baseCurrency"),
+        references_synced=True,
+    )
+    return {
+        "account": account,
+        "results": {
+            "products": product_count,
+            "warehouses": warehouse_result.get("warehouses", 0),
+            "locations": location_count,
+            "priceLists": pricelist_result.get("price_lists", 0),
+            "priceListValues": pricelist_result.get("price_list_values", 0),
+        },
+        "logs": logs,
+    }
+
+
+def validate_inventory_file(store: Store, request_id: str, params: dict[str, Any]) -> dict[str, Any]:
+    account_name = normalize_account_name(params.get("accountName"))
+    path = Path(str(params.get("path", ""))).expanduser()
+    if not path.exists() or not path.is_file():
+        raise WorkerError("source_missing", "Choose an existing local CSV or XLSX file.")
+    if path.suffix.lower() not in {".csv", ".xlsx"}:
+        raise WorkerError("unsupported_source", "Inventory import accepts CSV or XLSX files.")
+    credentials = credentials_for_account(store, account_name)
+    db_path = account_data_db(store, account_name)
+    prepare_legacy_credentials(store, account_name, credentials, account_summary_without_secret(store, account_name).get("baseCurrency"))
+    update_job(store, request_id, kind="inventory_validation", state="running", source_path=str(path))
+    logs: list[str] = []
+
+    def worker_log(message: str) -> None:
+        logs.append(str(message))
+        if len(logs) > 100:
+            del logs[: len(logs) - 100]
+
+    with legacy_cwd(store):
+        inserted = validate_and_enrich_inventory(
+            str(path),
+            str(db_path),
+            account_name,
+            log_callback=worker_log,
+        )
+    counts = reference_counts(db_path)
+    update_job(store, request_id, kind="inventory_validation", state="succeeded", message=f"Validated {inserted} rows.")
+    return {
+        "inserted": inserted,
+        "account": account_summary(store, account_name),
+        "referenceCounts": counts,
+        "logs": logs,
+        "validatedPreview": validated_inventory_preview(db_path),
+    }
+
+
+def validated_inventory_preview(db_path: Path, limit: int = 50) -> list[dict[str, Any]]:
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT sku, quantity, locationId, costprice, warehouseId, productId, stockTracked "
+                "FROM validated_inventory ORDER BY id LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+    except sqlite3.OperationalError:
+        return []
 
 
 def output(payload: dict[str, Any]) -> None:
@@ -282,6 +686,16 @@ def handle(store: Store, request: dict[str, Any]) -> None:
             succeed(request_id, import_synthetic_csv(store, request_id, params))
         elif method == "previewDataset":
             succeed(request_id, preview_dataset(store, params))
+        elif method == "listAccounts":
+            succeed(request_id, list_accounts(store))
+        elif method == "saveAccount":
+            succeed(request_id, save_account(store, params))
+        elif method == "validateAccount":
+            succeed(request_id, validate_account(store, params))
+        elif method == "syncInventoryReferences":
+            succeed(request_id, sync_inventory_references(store, request_id, params))
+        elif method == "validateInventoryFile":
+            succeed(request_id, validate_inventory_file(store, request_id, params))
         elif method == "jobHistory":
             succeed(request_id, job_history(store))
         elif method == "cancel":
@@ -319,4 +733,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

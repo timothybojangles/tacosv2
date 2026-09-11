@@ -4,6 +4,7 @@ import sqlite3
 import os
 import re
 import sys
+from decimal import Decimal, InvalidOperation
 
 from brightpearl.common import processing_column_definitions, connect_sqlite, ensure_account_binding, log_sync
 from brightpearl.settings import get_settings
@@ -28,7 +29,12 @@ def _lookup_location_id(cur, warehouse_id, location_value):
         return None
 
     if location_value.isdigit():
-        return int(location_value)
+        cur.execute(
+            f"SELECT locationId FROM {REF_LOCATIONS_TABLE} WHERE warehouseId = ? AND locationId = ?",
+            (warehouse_id, int(location_value)),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row else None
 
     parts = [part.strip() for part in location_value.split(".")]
     if len(parts) > 4 or any(part == "" for part in parts):
@@ -60,6 +66,19 @@ def _lookup_location_id(cur, warehouse_id, location_value):
     )
     row = cur.fetchone()
     return row[0] if row else None
+
+
+def _parse_decimal(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = Decimal(text)
+    except InvalidOperation:
+        return None
+    if not parsed.is_finite():
+        return None
+    return float(parsed)
 
 def _warehouse_to_id(cur, warehouse_field: str):
     s = (warehouse_field or "").strip()
@@ -145,6 +164,14 @@ def validate_and_enrich_inventory(csv_path, db_path, account_name, region=None, 
             if not sku or not warehouse_field:
                 continue
 
+            parsed_quantity = _parse_decimal(quantity)
+            parsed_costprice = _parse_decimal(costprice)
+            if parsed_quantity is None or parsed_costprice is None:
+                missing_required_row.append(
+                    row_with_validation_error(row, "quantity and costprice must be finite numbers")
+                )
+                continue
+
             cur.execute("SELECT productId, stockTracked FROM product_catalogue WHERE SKU = ?", (sku,))
             result = cur.fetchone()
 
@@ -166,7 +193,7 @@ def validate_and_enrich_inventory(csv_path, db_path, account_name, region=None, 
             cur.execute(f"""
                 INSERT INTO {VALIDATED_TABLE} (sku, quantity, locationId, costprice, warehouseId, productId, stockTracked)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (sku, quantity, locationId, costprice, str(warehouse_id_int), productId, stockTracked))
+            """, (sku, parsed_quantity, locationId, parsed_costprice, str(warehouse_id_int), productId, stockTracked))
             inserted_count += 1
 
     conn.commit(); conn.close()

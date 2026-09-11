@@ -47,10 +47,11 @@ Verified on Tim's local Windows checkout on branch `codex/desktop-migration-base
 Dependency resolution was performed on Windows/Python 3.12 and recorded in
 `requirements-dev-win-py312.lock` and `requirements-build-win-py312.lock`.
 
-Baseline test results:
+Baseline test results after the installed-prototype foundation update:
 
-- `.\.venv\Scripts\python.exe -m pytest -q`: 33 passed, 6 xfailed.
-- `.\.venv\Scripts\python.exe -m pytest -q tests/test_migration_regressions.py`: 2 passed, 6 xfailed.
-- `.\.venv\Scripts\python.exe -m pytest -q -m "not legacy_gap"`: 33 passed, 6 deselected.
+- `.\.venv\Scripts\python.exe -m pytest -q`: 37 passed, 2 xfailed.
+- `.\.venv\Scripts\python.exe -m pytest -q tests/test_migration_regressions.py`: 6 passed, 2 xfailed.
+- `.\.venv\Scripts\python.exe -m pytest -q -m "not legacy_gap"`: 37 passed, 2 deselected.
 
-The six `legacy_gap` cases failed only through their strict expected assertions.
+The inventory location and numeric validation gaps are fixed. The remaining
+strict `legacy_gap` cases are SO-001 and REF-001.

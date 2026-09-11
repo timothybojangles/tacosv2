@@ -93,7 +93,16 @@ fn validate_request(request: &Value) -> Result<(), String> {
     }
     let method = request.get("method").and_then(Value::as_str).unwrap_or_default();
     match method {
-        "importSyntheticCsv" | "previewDataset" | "jobHistory" | "cancel" | "shutdown" => Ok(()),
+        "importSyntheticCsv"
+        | "previewDataset"
+        | "listAccounts"
+        | "saveAccount"
+        | "validateAccount"
+        | "syncInventoryReferences"
+        | "validateInventoryFile"
+        | "jobHistory"
+        | "cancel"
+        | "shutdown" => Ok(()),
         _ => Err("Engine method is not allowed.".to_string()),
     }
 }
@@ -151,6 +160,7 @@ fn main() {
         .manage(EngineState {
             worker: Mutex::new(None),
         })
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![engine_request])
         .run(tauri::generate_context!())
         .expect("error while running TACOS desktop prototype");
