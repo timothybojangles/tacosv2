@@ -32,3 +32,25 @@ Before committing locks: validate the full suite in a clean environment, audit l
 The desktop prototype needs an environment with permitted Python/npm/Cargo package downloads, Rust and Windows build tools, plus a Windows machine for installer verification. Node was present in the authoring environment, but that does not verify frontend dependency availability. Code can be reviewed here; native Windows build results must come from an actual Windows build.
 
 SharePoint distribution requires no app integration or Graph permissions for v1: users download files through their existing company access and run them locally. Configure all working data under local application storage, outside synchronised folders.
+
+## Windows verification on 2026-09-11
+
+Verified on Tim's local Windows checkout on branch `codex/desktop-migration-baseline`.
+
+- Python `3.12.10`
+- Node.js `24.19.0`
+- npm `11.17.0`
+- Rust `1.98.1`
+- Cargo `1.98.1`
+- MSVC `19.44.35228` from Visual Studio 2022 Build Tools
+
+Dependency resolution was performed on Windows/Python 3.12 and recorded in
+`requirements-dev-win-py312.lock` and `requirements-build-win-py312.lock`.
+
+Baseline test results:
+
+- `.\.venv\Scripts\python.exe -m pytest -q`: 33 passed, 6 xfailed.
+- `.\.venv\Scripts\python.exe -m pytest -q tests/test_migration_regressions.py`: 2 passed, 6 xfailed.
+- `.\.venv\Scripts\python.exe -m pytest -q -m "not legacy_gap"`: 33 passed, 6 deselected.
+
+The six `legacy_gap` cases failed only through their strict expected assertions.

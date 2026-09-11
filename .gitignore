@@ -6,6 +6,8 @@ build/
 dist/
 node_modules/
 target/
+desktop/engine-dist/
+desktop/src-tauri/gen/
 db/
 output/
 *.log
