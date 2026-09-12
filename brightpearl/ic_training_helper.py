@@ -139,7 +139,7 @@ def _discover_dummy_records(account_name, region, headers, db_path, *,
     try:
         method = conn.execute(
             "SELECT shippingMethodId FROM ref_shipping_methods "
-            "WHERE lower(trim(code)) = lower(?) LIMIT 1",
+            "WHERE lower(trim(name)) = lower(?) LIMIT 1",
             ("Magical shipping method",),
         ).fetchone()
     except sqlite3.OperationalError:

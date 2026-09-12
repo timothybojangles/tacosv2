@@ -4,6 +4,7 @@ import sqlite3
 import os
 import re
 import sys
+from decimal import Decimal, InvalidOperation
 
 from brightpearl.common import processing_column_definitions, connect_sqlite, ensure_account_binding, log_sync
 from brightpearl.settings import get_settings
@@ -28,7 +29,12 @@ def _lookup_location_id(cur, warehouse_id, location_value):
         return None
 
     if location_value.isdigit():
-        return int(location_value)
+        cur.execute(
+            f"SELECT locationId FROM {REF_LOCATIONS_TABLE} WHERE warehouseId = ? AND locationId = ?",
+            (warehouse_id, int(location_value)),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row else None
 
     parts = [part.strip() for part in location_value.split(".")]
     if len(parts) > 4 or any(part == "" for part in parts):
@@ -60,6 +66,19 @@ def _lookup_location_id(cur, warehouse_id, location_value):
     )
     row = cur.fetchone()
     return row[0] if row else None
+
+
+def _parse_decimal(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = Decimal(text)
+    except InvalidOperation:
+        return None
+    if not parsed.is_finite():
+        return None
+    return float(parsed)
 
 def _warehouse_to_id(cur, warehouse_field: str):
     s = (warehouse_field or "").strip()
@@ -122,6 +141,7 @@ def validate_and_enrich_inventory(csv_path, db_path, account_name, region=None, 
     non_stock_tracked = []
     unmatched_locations = []
     missing_required_row = []
+    rejected_rows = []
     inserted_count = 0
 
     with open_csv(csv_path) as csvfile:
@@ -131,42 +151,85 @@ def validate_and_enrich_inventory(csv_path, db_path, account_name, region=None, 
                 log(f"🛑 Cancel at row {idx}. Inserted so far: {inserted_count}.", log_callback)
                 break
 
-            sku = row["sku"].strip()
+            sku = row.get("sku", "").strip()
             warehouse_field = (row.get("warehouseId") or row.get("warehouseName") or row.get("warehouse") or "").strip()
             quantity = row.get("quantity", "").strip()
             costprice = row.get("costprice", "").strip()
             location_value = _get_location_value(row)
 
+            required_values = {
+                "sku": sku,
+                "quantity": quantity,
+                "locationName": location_value,
+                "costprice": costprice,
+                "warehouseId": warehouse_field,
+            }
+            categories = []
+            validation_errors = []
+
+            def reject(category, message):
+                if category not in categories:
+                    categories.append(category)
+                if message not in validation_errors:
+                    validation_errors.append(message)
+
+            missing_fields = [name for name, value in required_values.items() if not value]
+            if missing_fields:
+                reject("missing_required", f"missing required fields: {', '.join(missing_fields)}")
+
             length_errors = product_field_length_errors(sku)
-            if length_errors:
-                missing_required_row.append(row_with_validation_error(row, length_errors))
+            for error in length_errors:
+                reject("missing_required", error)
+
+            parsed_quantity = _parse_decimal(quantity)
+            parsed_costprice = _parse_decimal(costprice)
+            if quantity and parsed_quantity is None:
+                reject("missing_required", "quantity must be a finite number")
+            if costprice and parsed_costprice is None:
+                reject("missing_required", "costprice must be a finite number")
+
+            result = None
+            if sku:
+                cur.execute("SELECT productId, stockTracked FROM product_catalogue WHERE SKU = ?", (sku,))
+                result = cur.fetchone()
+                if not result:
+                    reject("unmatched_sku", "SKU was not found in the synced product catalogue")
+                elif not result[1]:
+                    reject("non_stock_tracked", "Product is not stock tracked")
+
+            warehouse_id_int = _warehouse_to_id(cur, warehouse_field) if warehouse_field else None
+            if warehouse_field and warehouse_id_int is None:
+                reject("unmatched_location", "Warehouse was not found in synced references")
+
+            locationId = None
+            if warehouse_id_int is not None and location_value:
+                locationId = _lookup_location_id(cur, warehouse_id_int, location_value)
+                if locationId is None:
+                    reject("unmatched_location", "Location was not found in the selected warehouse")
+
+            if categories:
+                if "missing_required" in categories:
+                    missing_required_row.append(row_with_validation_error(row, validation_errors))
+                if "unmatched_sku" in categories:
+                    unmatched.append(row)
+                if "non_stock_tracked" in categories:
+                    non_stock_tracked.append(row)
+                if "unmatched_location" in categories:
+                    unmatched_locations.append(row)
+                rejected_rows.append({
+                    "source_row": idx,
+                    "validation_categories": "; ".join(categories),
+                    "validation_error": "; ".join(validation_errors),
+                    **row,
+                })
                 continue
-
-            if not sku or not warehouse_field:
-                continue
-
-            cur.execute("SELECT productId, stockTracked FROM product_catalogue WHERE SKU = ?", (sku,))
-            result = cur.fetchone()
-
-            if not result:
-                unmatched.append(row); continue
 
             productId, stockTracked = result
-            if not stockTracked:
-                non_stock_tracked.append(row); continue
-
-            warehouse_id_int = _warehouse_to_id(cur, warehouse_field)
-            if warehouse_id_int is None:
-                unmatched_locations.append(row); continue
-
-            locationId = _lookup_location_id(cur, warehouse_id_int, location_value)
-            if locationId is None:
-                unmatched_locations.append(row); continue
 
             cur.execute(f"""
                 INSERT INTO {VALIDATED_TABLE} (sku, quantity, locationId, costprice, warehouseId, productId, stockTracked)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (sku, quantity, locationId, costprice, str(warehouse_id_int), productId, stockTracked))
+            """, (sku, parsed_quantity, locationId, parsed_costprice, str(warehouse_id_int), productId, stockTracked))
             inserted_count += 1
 
     conn.commit(); conn.close()
@@ -177,6 +240,21 @@ def validate_and_enrich_inventory(csv_path, db_path, account_name, region=None, 
     unmatched_dir = get_settings().unmatched_output_dir
     if unmatched_dir:
         os.makedirs(unmatched_dir, exist_ok=True)
+
+    if rejected_rows:
+        rejected_file = os.path.join(unmatched_dir, f"{account_name}_inventory_rejected.csv")
+        with open(rejected_file, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "source_row",
+                    "validation_categories",
+                    "validation_error",
+                    *(reader.fieldnames or []),
+                ],
+            )
+            writer.writeheader()
+            writer.writerows(rejected_rows)
 
     # Write rows that exceed Brightpearl's product identifier limits.
     if missing_required_row:

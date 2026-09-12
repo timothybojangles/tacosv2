@@ -1,0 +1,6 @@
+# Direct dependencies discovered from the legacy application's imports.
+# Resolution input, NOT a reproducible lockfile. See docs/migration/development.md.
+requests
+urllib3
+customtkinter
+Pillow

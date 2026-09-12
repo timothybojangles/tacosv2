@@ -1,0 +1,433 @@
+:root {
+  font-family: Inter, "Segoe UI", Arial, sans-serif;
+  color: #1f2933;
+  background: #f6f7f9;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+.app {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 248px minmax(0, 1fr);
+}
+
+.sidebar {
+  background: #1d252d;
+  color: #f8fafc;
+  padding: 20px 14px;
+}
+
+.brand {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 4px 8px 24px;
+}
+
+.brandMark {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: #f2c94c;
+  color: #1d252d;
+  font-weight: 800;
+}
+
+.brand span:last-child,
+header p,
+.step p,
+.settingsGrid p,
+.meta,
+.empty {
+  color: #64748b;
+}
+
+.brand span:last-child {
+  display: block;
+  color: #b8c2cc;
+  font-size: 13px;
+}
+
+nav {
+  display: grid;
+  gap: 4px;
+  margin-top: 18px;
+}
+
+nav button,
+.toolbar button,
+.sourceRow button,
+.disabledAction {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 8px;
+  min-height: 38px;
+  padding: 0 12px;
+  cursor: pointer;
+}
+
+nav button {
+  background: transparent;
+  color: #dbe4ed;
+  width: 100%;
+}
+
+nav button.active,
+nav button:hover {
+  background: #34414f;
+}
+
+.workspace {
+  padding: 28px;
+  min-width: 0;
+}
+
+.sideLabel {
+  color: #b8c2cc;
+  font-size: 13px;
+  margin: 0 8px 6px;
+}
+
+.sidebar select {
+  width: calc(100% - 16px);
+  margin: 0 8px;
+  color: #1f2933;
+}
+
+header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 22px;
+}
+
+h1,
+h2,
+p {
+  margin-top: 0;
+}
+
+h1 {
+  font-size: 28px;
+  margin-bottom: 6px;
+}
+
+h2 {
+  font-size: 17px;
+}
+
+.account,
+.notice {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #e7f1ec;
+  color: #23634d;
+}
+
+.notice {
+  margin-bottom: 16px;
+  width: 100%;
+}
+
+.notice.error {
+  background: #fff1f0;
+  color: #9f1d1d;
+}
+
+.taskFlow {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(220px, 1fr));
+  gap: 14px;
+}
+
+.accountPanel {
+  grid-template-columns: minmax(320px, 1.3fr) minmax(280px, 0.7fr);
+  align-items: start;
+}
+
+.formGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(220px, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.formGrid label {
+  margin: 0;
+}
+
+.formGrid input,
+.formGrid select {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+}
+
+.accountSnapshot {
+  border-left: 1px solid #d9e1e8;
+  padding-left: 18px;
+}
+
+.step,
+.panel {
+  background: #fff;
+  border: 1px solid #d9e1e8;
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.step {
+  min-height: 190px;
+}
+
+.stepIndex {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: #2f80ed;
+  color: white;
+  font-weight: 700;
+  margin-bottom: 12px;
+}
+
+label {
+  display: block;
+  margin-bottom: 8px;
+  font-weight: 650;
+}
+
+.sourceRow,
+.toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.counts {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 14px;
+  font-size: 13px;
+}
+
+.counts span {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+input,
+select {
+  min-height: 38px;
+  border: 1px solid #cbd5df;
+  border-radius: 8px;
+  padding: 0 10px;
+  background: white;
+  min-width: 180px;
+}
+
+.sourceRow input {
+  flex: 1;
+  min-width: 260px;
+}
+
+.sourceRow button,
+.toolbar button {
+  background: #23634d;
+  color: white;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.disabledAction {
+  background: #e5e7eb;
+  color: #475569;
+}
+
+dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 12px;
+}
+
+dt {
+  color: #64748b;
+}
+
+dd {
+  margin: 0;
+  font-weight: 700;
+}
+
+.panel {
+  display: grid;
+  gap: 14px;
+}
+
+.tableWrap {
+  overflow: auto;
+  border: 1px solid #d9e1e8;
+  border-radius: 8px;
+  min-height: 320px;
+  background: #fff;
+}
+
+.resultHeader,
+.resultCounts,
+.resultTabs {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.resultHeader {
+  justify-content: space-between;
+}
+
+.resultHeader p {
+  color: #64748b;
+  margin-bottom: 0;
+}
+
+.resultCounts span {
+  padding: 8px 10px;
+  border-radius: 8px;
+}
+
+.resultCounts button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  border: 0;
+  border-radius: 8px;
+  padding: 0 12px;
+  background: #23634d;
+  color: white;
+  cursor: pointer;
+}
+
+.acceptedCount {
+  color: #23634d;
+  background: #e7f1ec;
+}
+
+.rejectedCount {
+  color: #9f1d1d;
+  background: #fff1f0;
+}
+
+.resultTabs {
+  border-bottom: 1px solid #d9e1e8;
+}
+
+.resultTabs button {
+  border: 0;
+  border-bottom: 3px solid transparent;
+  padding: 8px 12px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.resultTabs button.active {
+  border-bottom-color: #23634d;
+  color: #23634d;
+  font-weight: 700;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+th,
+td {
+  text-align: left;
+  border-bottom: 1px solid #edf1f5;
+  padding: 9px 10px;
+  white-space: nowrap;
+}
+
+th {
+  position: sticky;
+  top: 0;
+  background: #f8fafc;
+}
+
+.job {
+  display: grid;
+  grid-template-columns: 180px 140px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  padding: 10px 0;
+  border-bottom: 1px solid #edf1f5;
+}
+
+code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.settingsGrid {
+  grid-template-columns: repeat(3, minmax(200px, 1fr));
+}
+
+.spin {
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 860px) {
+  .app {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    position: static;
+  }
+
+  .taskFlow,
+  .settingsGrid,
+  .accountPanel,
+  .formGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .accountSnapshot {
+    border-left: 0;
+    padding-left: 0;
+  }
+}
