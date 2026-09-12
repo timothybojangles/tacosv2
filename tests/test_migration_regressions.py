@@ -108,6 +108,31 @@ def test_missing_inventory_fields_are_reported(tmp_path, inventory_db):
     assert rejected[0]["validation_error"] == "missing required fields: locationName"
 
 
+def test_inventory_row_reports_every_independent_validation_issue(tmp_path, inventory_db):
+    source = tmp_path / "stock.csv"
+    with source.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["sku", "warehouseId", "locationId", "quantity", "costprice"],
+        )
+        writer.writeheader()
+        writer.writerow(
+            dict(sku="UNKNOWN-SKU", warehouseId="1", locationId="999", quantity="3", costprice="2.50")
+        )
+    errors = tmp_path / "errors"
+    with patch.object(validator, "log"), patch.object(
+        validator, "get_settings", return_value=SimpleNamespace(unmatched_output_dir=str(errors))
+    ):
+        assert validator.validate_and_enrich_inventory(str(source), str(inventory_db), "synthetic") == 0
+
+    with (errors / "synthetic_inventory_rejected.csv").open(encoding="utf-8") as handle:
+        rejected = list(csv.DictReader(handle))
+    assert len(rejected) == 1
+    assert rejected[0]["validation_categories"] == "unmatched_sku; unmatched_location"
+    assert "SKU was not found" in rejected[0]["validation_error"]
+    assert "Location was not found" in rejected[0]["validation_error"]
+
+
 @pytest.mark.legacy_gap
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason="SO-001: retry after payment failure recreates confirmed order")
 def test_saved_order_id_prevents_second_order_creation():

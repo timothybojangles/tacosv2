@@ -225,7 +225,9 @@ def test_inventory_validation_returns_accepted_and_rejected_rows(tmp_path, monke
         )
 
     source = tmp_path / "inventory.csv"
-    rejected_rows = "".join(f"BAD-SKU-{index},3,A,2.00,1\n" for index in range(105))
+    rejected_rows = "BAD-SKU-0,3,NOT-A-LOCATION,2.00,1\n" + "".join(
+        f"BAD-SKU-{index},3,A,2.00,1\n" for index in range(1, 105)
+    )
     source.write_text(
         "sku,quantity,locationName,costprice,warehouseId\n"
         "GOOD-SKU,2,A,1.50,1\n"
@@ -247,7 +249,9 @@ def test_inventory_validation_returns_accepted_and_rejected_rows(tmp_path, monke
     assert result["totalRows"] == 106
     assert result["validatedPreview"][0]["sku"] == "GOOD-SKU"
     assert result["rejectedPreview"][0]["sku"] == "BAD-SKU-0"
-    assert result["rejectedPreview"][0]["category"] == "unmatched_sku"
+    assert result["rejectedPreview"][0]["category"] == "unmatched_sku; unmatched_location"
+    assert "SKU was not found" in result["rejectedPreview"][0]["reason"]
+    assert "Location was not found" in result["rejectedPreview"][0]["reason"]
     assert len(result["rejectedPreview"]) == 100
 
     destination = tmp_path / "saved-exceptions.csv"
@@ -268,4 +272,5 @@ def test_inventory_validation_returns_accepted_and_rejected_rows(tmp_path, monke
     with destination.open(encoding="utf-8-sig", newline="") as handle_file:
         full_report = list(csv.DictReader(handle_file))
     assert len(full_report) == 105
+    assert full_report[0]["category"] == "unmatched_sku; unmatched_location"
     assert full_report[-1]["sku"] == "BAD-SKU-104"

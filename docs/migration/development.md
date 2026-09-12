@@ -49,9 +49,9 @@ Dependency resolution was performed on Windows/Python 3.12 and recorded in
 
 Baseline test results after the installed-prototype foundation update:
 
-- `.\.venv\Scripts\python.exe -m pytest -q`: 38 passed, 2 xfailed.
-- `.\.venv\Scripts\python.exe -m pytest -q tests/test_migration_regressions.py`: 7 passed, 2 xfailed.
-- `.\.venv\Scripts\python.exe -m pytest -q -m "not legacy_gap"`: 38 passed, 2 deselected.
+- `.\.venv\Scripts\python.exe -m pytest -q`: 39 passed, 2 xfailed.
+- `.\.venv\Scripts\python.exe -m pytest -q tests/test_migration_regressions.py`: 8 passed, 2 xfailed.
+- `.\.venv\Scripts\python.exe -m pytest -q -m "not legacy_gap"`: 39 passed, 2 deselected.
 
 The inventory location and numeric validation gaps are fixed. The remaining
 strict `legacy_gap` cases are SO-001 and REF-001.

@@ -494,7 +494,8 @@ def validate_inventory_file(store: Store, request_id: str, params: dict[str, Any
         "non_stock_tracked": exception_dir / f"{account_name}_non_stock_tracked.csv",
         "unmatched_location": exception_dir / f"{account_name}_unmatched_locations.csv",
     }
-    for exception_file in exception_files.values():
+    consolidated_rejections = exception_dir / f"{account_name}_inventory_rejected.csv"
+    for exception_file in [*exception_files.values(), consolidated_rejections]:
         exception_file.unlink(missing_ok=True)
 
     with legacy_operation(store):
@@ -507,7 +508,9 @@ def validate_inventory_file(store: Store, request_id: str, params: dict[str, Any
     reports_dir = store.accounts / account_name / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
     report_path = reports_dir / f"inventory-exceptions-{int(time.time() * 1000)}.csv"
-    rejected, rejected_rows = inventory_rejection_report(exception_files, report_path)
+    rejected, rejected_rows = inventory_rejection_report(
+        exception_files, report_path, consolidated_rejections=consolidated_rejections
+    )
     counts = reference_counts(db_path)
     update_job(
         store,
@@ -531,7 +534,10 @@ def validate_inventory_file(store: Store, request_id: str, params: dict[str, Any
 
 
 def inventory_rejection_report(
-    exception_files: dict[str, Path], report_path: Path, limit: int = 100
+    exception_files: dict[str, Path],
+    report_path: Path,
+    limit: int = 100,
+    consolidated_rejections: Path | None = None,
 ) -> tuple[int, list[dict[str, Any]]]:
     reasons = {
         "missing_required": "Missing or invalid required value",
@@ -539,6 +545,33 @@ def inventory_rejection_report(
         "non_stock_tracked": "Product is not stock tracked",
         "unmatched_location": "Warehouse or location was not found in synced references",
     }
+    if consolidated_rejections and consolidated_rejections.exists():
+        rejected: list[dict[str, Any]] = []
+        with consolidated_rejections.open("r", encoding="utf-8-sig", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        if rows:
+            source_fields = [
+                field
+                for field in rows[0]
+                if field not in {"validation_categories", "validation_error"}
+            ]
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            with report_path.open("w", encoding="utf-8-sig", newline="") as report_handle:
+                writer = csv.DictWriter(
+                    report_handle, fieldnames=["category", "reason", *source_fields]
+                )
+                writer.writeheader()
+                for row in rows:
+                    detailed_row = {
+                        "category": row.pop("validation_categories", ""),
+                        "reason": row.pop("validation_error", ""),
+                        **row,
+                    }
+                    writer.writerow(detailed_row)
+                    if len(rejected) < limit:
+                        rejected.append(detailed_row)
+        return len(rows), rejected
+
     source_fields: list[str] = []
     for path in exception_files.values():
         if not path.exists():

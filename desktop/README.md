@@ -71,9 +71,9 @@ Set-Location ..; npm run tauri:build
 
 Observed results:
 
-- Full legacy/migration suite: 38 passed, 2 xfailed.
-- Migration regression file: 7 passed, 2 xfailed.
-- Non-legacy-gap selection: 38 passed, 2 deselected.
+- Full legacy/migration suite: 39 passed, 2 xfailed.
+- Migration regression file: 8 passed, 2 xfailed.
+- Non-legacy-gap selection: 39 passed, 2 deselected.
 - Worker tests: 7 passed.
 - Frontend build: passed.
 - Cargo check: passed.
