@@ -139,7 +139,12 @@ export default function App() {
     let current = true;
     void engine("inventoryPriceLists", { accountName: activeAccountName })
       .then((result) => { if (current) setPriceLists(result.priceLists); })
-      .catch(() => { if (current) setPriceLists([]); });
+      .catch((err) => {
+        if (current) {
+          setPriceLists([]);
+          setError(`Could not load price lists: ${errorMessage(err)}`);
+        }
+      });
     return () => { current = false; };
   }, [activeAccountName]);
 
@@ -201,6 +206,7 @@ export default function App() {
     });
     if (typeof selected === "string") {
       setSourcePath(selected);
+      setValidation(null);
     }
   }
 
@@ -369,7 +375,7 @@ export default function App() {
               <h2>Source</h2>
               <p>Expected columns: {priceListId ? "sku, quantity, locationName, warehouseId" : inventoryHeaders.join(", ")}. Costprice is optional when using a synced price list.</p>
               <div className="sourceRow">
-                <input value={sourcePath} onChange={(event) => setSourcePath(event.target.value)} placeholder="Choose CSV/XLSX source" />
+                <input value={sourcePath} onChange={(event) => { setSourcePath(event.target.value); setValidation(null); }} placeholder="Choose CSV/XLSX source" />
                 <button onClick={chooseSource}>
                   <FolderOpen size={18} />
                   Select
@@ -378,13 +384,13 @@ export default function App() {
               <div className="formGrid">
                 <label>
                   Cost source
-                  <select value={priceListId} onChange={(event) => setPriceListId(event.target.value)}>
+                  <select value={priceListId} onChange={(event) => { setPriceListId(event.target.value); setValidation(null); }}>
                     <option value="">Import file (costprice column)</option>
                     {priceLists.map((list) => <option key={list.id} value={list.id}>{list.name} ({list.id})</option>)}
                   </select>
                 </label>
                 <label className="checkboxLabel">
-                  <input type="checkbox" checked={allowZeroBlanks} onChange={(event) => setAllowZeroBlanks(event.target.checked)} />
+                  <input type="checkbox" checked={allowZeroBlanks} onChange={(event) => { setAllowZeroBlanks(event.target.checked); setValidation(null); }} />
                   Allow zero and blank quantity/cost
                 </label>
               </div>

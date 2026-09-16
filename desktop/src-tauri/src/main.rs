@@ -110,6 +110,7 @@ fn validate_request(request: &Value) -> Result<(), String> {
         | "saveAccount"
         | "validateAccount"
         | "syncInventoryReferences"
+        | "inventoryPriceLists"
         | "validateInventoryFile"
         | "saveInventoryExceptionReport"
         | "jobHistory"
@@ -181,5 +182,21 @@ fn main() {
 impl Drop for WorkerProcess {
     fn drop(&mut self) {
         let _ = self.child.kill();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allows_account_price_list_lookup() {
+        let request = json!({
+            "protocolVersion": 1,
+            "id": "price-lists-test",
+            "method": "inventoryPriceLists",
+            "params": {"accountName": "demo"}
+        });
+        assert!(validate_request(&request).is_ok());
     }
 }

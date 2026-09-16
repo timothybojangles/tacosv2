@@ -57,6 +57,11 @@ PyInstaller before building the Tauri app. Generated files under
   the selected account. In price-list mode, file `costprice` is ignored; missing
   or invalid reference values reject the row. Zero list values require the
   blank/zero option.
+- Price-list workflow: select the account, sync inventory references, choose a
+  cost source, then validate. Validation stores the resolved cost in
+  `validated_inventory.costprice` for the accepted preview. Changing the source
+  file or cost options clears the previous result. There is no separate Enhance
+  action; the Brightpearl write path remains disabled.
 - Validation streams exception rows to disk, reports progress every 500 rows,
   and creates a SKU index to speed repeated catalogue lookups.
 - Synthetic local CSV import, DuckDB page preview, filter and sort for large-data
@@ -91,7 +96,7 @@ Measured artifact sizes from this build:
 
 - Release desktop executable: 9,128,960 bytes.
 - Private worker bundle: 63,375,812 bytes.
-- NSIS setup executable with offline WebView2 prerequisite: 236,879,526 bytes.
+- NSIS setup executable with offline WebView2 prerequisite: 236,878,241 bytes.
 
 The 20k/200k/2M dataset performance gate still needs measured hardware results
 before the prototype can be treated as accepted.

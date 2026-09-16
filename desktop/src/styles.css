@@ -157,8 +157,20 @@ h2 {
 
 .taskFlow {
   display: grid;
-  grid-template-columns: repeat(3, minmax(220px, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 14px;
+}
+
+.taskFlow .step {
+  min-width: 0;
+}
+
+.taskFlow .formGrid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.taskFlow .formGrid select {
+  min-width: 0;
 }
 
 .accountPanel {
@@ -267,7 +279,23 @@ select {
 
 .sourceRow input {
   flex: 1;
-  min-width: 260px;
+  min-width: 0;
+}
+
+.sourceRow {
+  min-width: 0;
+}
+
+@media (max-width: 1320px) {
+  .taskFlow {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1060px) {
+  .taskFlow {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .sourceRow button,
