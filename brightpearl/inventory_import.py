@@ -209,6 +209,7 @@ def update_product_catalogue(
                 product.get("primarySupplierId"),
             ),
         )
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_product_catalogue_sku ON product_catalogue(SKU)")
     conn.commit()
     conn.close()
     return product_counter

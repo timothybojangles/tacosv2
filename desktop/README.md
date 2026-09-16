@@ -51,6 +51,14 @@ PyInstaller before building the Tauri app. Generated files under
   inventory row, while the UI keeps a bounded preview.
 - Inventory validation reusing the legacy enrichment path and staging into
   `validated_inventory`.
+- Local validation offers an explicit option to allow blank or zero quantity and
+  cost values. Blanks become zero when enabled; non-finite numbers remain invalid.
+- Cost can be sourced from the import file or a synced price list belonging to
+  the selected account. In price-list mode, file `costprice` is ignored; missing
+  or invalid reference values reject the row. Zero list values require the
+  blank/zero option.
+- Validation streams exception rows to disk, reports progress every 500 rows,
+  and creates a SKU index to speed repeated catalogue lookups.
 - Synthetic local CSV import, DuckDB page preview, filter and sort for large-data
   prototype work.
 - Remote stock-correction writes are disabled in the UI.
@@ -58,7 +66,7 @@ PyInstaller before building the Tauri app. Generated files under
 
 ## Current verification
 
-Run on Tim's Windows checkout on 2026-09-11:
+Run on Tim's Windows checkout on 2026-09-16:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q
@@ -71,19 +79,19 @@ Set-Location ..; npm run tauri:build
 
 Observed results:
 
-- Full legacy/migration suite: 39 passed, 2 xfailed.
-- Migration regression file: 8 passed, 2 xfailed.
-- Non-legacy-gap selection: 39 passed, 2 deselected.
-- Worker tests: 7 passed.
+- Full legacy/migration suite: 47 passed, 2 xfailed.
+- Migration regression file: 16 passed, 2 xfailed.
+- Non-legacy-gap selection: 47 passed, 2 deselected.
+- Worker tests: 8 passed.
 - Frontend build: passed.
 - Cargo check: passed.
 - Tauri NSIS build: produced `TACOS Desktop_0.1.0_x64-setup.exe`.
 
 Measured artifact sizes from this build:
 
-- Release desktop executable: 8,905,728 bytes.
-- Private worker bundle: 60,974,205 bytes.
-- NSIS setup executable with offline WebView2 prerequisite: 236,259,790 bytes.
+- Release desktop executable: 9,128,960 bytes.
+- Private worker bundle: 63,375,812 bytes.
+- NSIS setup executable with offline WebView2 prerequisite: 236,879,526 bytes.
 
 The 20k/200k/2M dataset performance gate still needs measured hardware results
 before the prototype can be treated as accepted.

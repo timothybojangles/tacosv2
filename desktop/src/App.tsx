@@ -103,6 +103,9 @@ export default function App() {
     region: "euw1" as "euw1" | "use1",
   });
   const [sourcePath, setSourcePath] = useState("");
+  const [allowZeroBlanks, setAllowZeroBlanks] = useState(false);
+  const [priceListId, setPriceListId] = useState("");
+  const [priceLists, setPriceLists] = useState<{ id: number; name: string }[]>([]);
   const [validation, setValidation] = useState<any>(null);
   const [resultView, setResultView] = useState<"accepted" | "rejected">("accepted");
   const [jobs, setJobs] = useState<any[]>([]);
@@ -125,6 +128,20 @@ export default function App() {
   useEffect(() => {
     void refreshAccounts();
   }, []);
+
+  useEffect(() => {
+    setPriceListId("");
+    setValidation(null);
+    if (!activeAccountName) {
+      setPriceLists([]);
+      return;
+    }
+    let current = true;
+    void engine("inventoryPriceLists", { accountName: activeAccountName })
+      .then((result) => { if (current) setPriceLists(result.priceLists); })
+      .catch(() => { if (current) setPriceLists([]); });
+    return () => { current = false; };
+  }, [activeAccountName]);
 
   async function run(label: string, action: () => Promise<void>) {
     setBusy(label);
@@ -169,6 +186,8 @@ export default function App() {
     await run("syncReferences", async () => {
       const result = await engine("syncInventoryReferences", { accountName: activeAccountName });
       await refreshAccounts(result.account.accountName);
+      const lists = await engine("inventoryPriceLists", { accountName: activeAccountName });
+      setPriceLists(lists.priceLists);
       setMessage(
         `Synced products ${result.results.products}, warehouses ${result.results.warehouses}, locations ${result.results.locations}, price values ${result.results.priceListValues}.`
       );
@@ -188,7 +207,12 @@ export default function App() {
   async function validateSource() {
     if (!activeAccountName || !sourcePath) return;
     await run("validateSource", async () => {
-      const result = await engine("validateInventoryFile", { accountName: activeAccountName, path: sourcePath });
+      const result = await engine("validateInventoryFile", {
+        accountName: activeAccountName,
+        path: sourcePath,
+        allowZeroBlanks,
+        priceListId: priceListId ? Number(priceListId) : null,
+      });
       setValidation(result);
       setResultView(result.inserted > 0 ? "accepted" : "rejected");
       await refreshAccounts(result.account.accountName);
@@ -343,7 +367,7 @@ export default function App() {
             <section className="step">
               <div className="stepIndex">3</div>
               <h2>Source</h2>
-              <p>Expected columns: {inventoryHeaders.join(", ")}.</p>
+              <p>Expected columns: {priceListId ? "sku, quantity, locationName, warehouseId" : inventoryHeaders.join(", ")}. Costprice is optional when using a synced price list.</p>
               <div className="sourceRow">
                 <input value={sourcePath} onChange={(event) => setSourcePath(event.target.value)} placeholder="Choose CSV/XLSX source" />
                 <button onClick={chooseSource}>
@@ -351,6 +375,20 @@ export default function App() {
                   Select
                 </button>
               </div>
+              <div className="formGrid">
+                <label>
+                  Cost source
+                  <select value={priceListId} onChange={(event) => setPriceListId(event.target.value)}>
+                    <option value="">Import file (costprice column)</option>
+                    {priceLists.map((list) => <option key={list.id} value={list.id}>{list.name} ({list.id})</option>)}
+                  </select>
+                </label>
+                <label className="checkboxLabel">
+                  <input type="checkbox" checked={allowZeroBlanks} onChange={(event) => setAllowZeroBlanks(event.target.checked)} />
+                  Allow zero and blank quantity/cost
+                </label>
+              </div>
+              <p>{priceListId ? "Cost comes from the selected account's synced price list; costprice in the file is ignored." : "Cost comes from the import file."} Blank values become zero when allowed.</p>
             </section>
             <section className="step">
               <div className="stepIndex">4</div>

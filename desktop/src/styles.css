@@ -184,6 +184,21 @@ h2 {
   margin-top: 6px;
 }
 
+.formGrid .checkboxLabel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  align-self: end;
+  min-height: 38px;
+}
+
+.formGrid .checkboxLabel input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  flex: none;
+}
+
 .accountSnapshot {
   border-left: 1px solid #d9e1e8;
   padding-left: 18px;

@@ -472,6 +472,22 @@ def validate_inventory_file(store: Store, request_id: str, params: dict[str, Any
         raise WorkerError("unsupported_source", "Inventory import accepts CSV or XLSX files.")
     credentials = credentials_for_account(store, account_name)
     db_path = account_data_db(store, account_name)
+    allow_zero_blanks = params.get("allowZeroBlanks", False)
+    if not isinstance(allow_zero_blanks, bool):
+        raise WorkerError("invalid_options", "Allow zero and blank values must be a boolean.")
+    price_list_id = params.get("priceListId")
+    if price_list_id is not None:
+        try:
+            price_list_id = int(price_list_id)
+        except (TypeError, ValueError) as exc:
+            raise WorkerError("invalid_price_list", "Select a synced price list.") from exc
+        with sqlite3.connect(db_path) as conn:
+            try:
+                found = conn.execute("SELECT 1 FROM ref_price_lists WHERE priceListId = ?", (price_list_id,)).fetchone()
+            except sqlite3.OperationalError:
+                found = None
+        if not found:
+            raise WorkerError("invalid_price_list", "Selected price list is not present in this account's synced references.")
     prepare_legacy_credentials(store, account_name, credentials, account_summary_without_secret(store, account_name).get("baseCurrency"))
     update_job(store, request_id, kind="inventory_validation", state="running", source_path=str(path))
     logs: list[str] = []
@@ -480,6 +496,8 @@ def validate_inventory_file(store: Store, request_id: str, params: dict[str, Any
         logs.append(str(message))
         if len(logs) > 100:
             del logs[: len(logs) - 100]
+        if str(message).startswith("PROGRESS:"):
+            emit_event(request_id, "progress", {"message": str(message)})
 
     with legacy_cwd(store):
         configured_exception_dir = Path(get_settings().unmatched_output_dir)
@@ -504,6 +522,8 @@ def validate_inventory_file(store: Store, request_id: str, params: dict[str, Any
             str(db_path),
             account_name,
             log_callback=worker_log,
+            allow_zero_blanks=allow_zero_blanks,
+            price_list_id=price_list_id,
         )
     reports_dir = store.accounts / account_name / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
@@ -521,6 +541,8 @@ def validate_inventory_file(store: Store, request_id: str, params: dict[str, Any
     )
     return {
         "inserted": inserted,
+        "allowZeroBlanks": allow_zero_blanks,
+        "priceListId": price_list_id,
         "rejected": rejected,
         "totalRows": inserted + rejected,
         "account": account_summary(store, account_name),
@@ -531,6 +553,20 @@ def validate_inventory_file(store: Store, request_id: str, params: dict[str, Any
         "exceptionReportPath": str(report_path) if rejected else None,
         "exceptionReportFileName": report_path.name if rejected else None,
     }
+
+
+def inventory_price_lists(store: Store, params: dict[str, Any]) -> dict[str, Any]:
+    account_name = normalize_account_name(params.get("accountName"))
+    db_path = account_data_db(store, account_name)
+    with sqlite3.connect(db_path) as conn:
+        try:
+            rows = conn.execute(
+                "SELECT priceListId, COALESCE(name, code, CAST(priceListId AS TEXT)) "
+                "FROM ref_price_lists ORDER BY name, priceListId"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+    return {"priceLists": [{"id": row[0], "name": row[1]} for row in rows]}
 
 
 def inventory_rejection_report(
@@ -547,12 +583,12 @@ def inventory_rejection_report(
     }
     if consolidated_rejections and consolidated_rejections.exists():
         rejected: list[dict[str, Any]] = []
+        count = 0
         with consolidated_rejections.open("r", encoding="utf-8-sig", newline="") as handle:
-            rows = list(csv.DictReader(handle))
-        if rows:
+            reader = csv.DictReader(handle)
             source_fields = [
                 field
-                for field in rows[0]
+                for field in (reader.fieldnames or [])
                 if field not in {"validation_categories", "validation_error"}
             ]
             report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -561,7 +597,8 @@ def inventory_rejection_report(
                     report_handle, fieldnames=["category", "reason", *source_fields]
                 )
                 writer.writeheader()
-                for row in rows:
+                for row in reader:
+                    count += 1
                     detailed_row = {
                         "category": row.pop("validation_categories", ""),
                         "reason": row.pop("validation_error", ""),
@@ -570,7 +607,9 @@ def inventory_rejection_report(
                     writer.writerow(detailed_row)
                     if len(rejected) < limit:
                         rejected.append(detailed_row)
-        return len(rows), rejected
+        if count == 0:
+            report_path.unlink(missing_ok=True)
+        return count, rejected
 
     source_fields: list[str] = []
     for path in exception_files.values():
@@ -868,6 +907,8 @@ def handle(store: Store, request: dict[str, Any]) -> None:
             succeed(request_id, sync_inventory_references(store, request_id, params))
         elif method == "validateInventoryFile":
             succeed(request_id, validate_inventory_file(store, request_id, params))
+        elif method == "inventoryPriceLists":
+            succeed(request_id, inventory_price_lists(store, params))
         elif method == "saveInventoryExceptionReport":
             succeed(request_id, save_inventory_exception_report(store, params))
         elif method == "jobHistory":

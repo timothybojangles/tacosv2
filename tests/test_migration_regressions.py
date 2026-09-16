@@ -133,6 +133,56 @@ def test_inventory_row_reports_every_independent_validation_issue(tmp_path, inve
     assert "Location was not found" in rejected[0]["validation_error"]
 
 
+@pytest.mark.parametrize("quantity,cost,allowed,expected", [
+    ("", "", True, 1),
+    ("0", "0", True, 1),
+    ("", "", False, 0),
+    ("0", "0", False, 0),
+])
+def test_inventory_zero_and_blank_option(tmp_path, inventory_db, quantity, cost, allowed, expected):
+    source = tmp_path / "stock.csv"
+    with source.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["sku", "warehouseId", "locationId", "quantity", "costprice"])
+        writer.writeheader()
+        writer.writerow(dict(sku="TEST-001", warehouseId="1", locationId="10", quantity=quantity, costprice=cost))
+    with patch.object(validator, "log"), patch.object(
+        validator, "get_settings", return_value=SimpleNamespace(unmatched_output_dir=str(tmp_path / "errors"))
+    ):
+        assert validator.validate_and_enrich_inventory(
+            str(source), str(inventory_db), "synthetic", allow_zero_blanks=allowed
+        ) == expected
+    if expected:
+        with sqlite3.connect(inventory_db) as conn:
+            assert conn.execute("SELECT quantity, costprice FROM validated_inventory").fetchone() == (0.0, 0.0)
+
+
+@pytest.mark.parametrize("price,allowed,expected", [("12.50", False, 1), (0, True, 1), (0, False, 0), (None, True, 0)])
+def test_inventory_cost_from_synced_price_list(tmp_path, inventory_db, price, allowed, expected):
+    with sqlite3.connect(inventory_db) as conn:
+        conn.execute("CREATE TABLE ref_price_lists (priceListId INTEGER, name TEXT, code TEXT)")
+        conn.execute("INSERT INTO ref_price_lists VALUES (7, 'Cost', 'COST')")
+        conn.execute("CREATE TABLE ref_price_list_values (productId INTEGER, priceListId INTEGER, value TEXT)")
+        if price is not None:
+            conn.execute("INSERT INTO ref_price_list_values VALUES (101, 7, ?)", (price,))
+    source = tmp_path / "stock.csv"
+    with source.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["sku", "warehouseId", "locationId", "quantity"])
+        writer.writeheader()
+        writer.writerow(dict(sku="TEST-001", warehouseId="1", locationId="10", quantity="3"))
+    with patch.object(validator, "log"), patch.object(
+        validator, "get_settings", return_value=SimpleNamespace(unmatched_output_dir=str(tmp_path / "errors"))
+    ):
+        assert validator.validate_and_enrich_inventory(
+            str(source), str(inventory_db), "synthetic", allow_zero_blanks=allowed, price_list_id=7
+        ) == expected
+    if expected:
+        with sqlite3.connect(inventory_db) as conn:
+            assert conn.execute("SELECT costprice FROM validated_inventory").fetchone()[0] == float(price)
+    else:
+        with (tmp_path / "errors" / "synthetic_inventory_rejected.csv").open(encoding="utf-8") as handle:
+            assert "price list" in list(csv.DictReader(handle))[0]["validation_error"].lower()
+
+
 @pytest.mark.legacy_gap
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason="SO-001: retry after payment failure recreates confirmed order")
 def test_saved_order_id_prevents_second_order_creation():
