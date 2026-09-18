@@ -14,7 +14,6 @@ import {
   Lock,
   RefreshCw,
   Settings,
-  UploadCloud,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
@@ -107,6 +106,7 @@ export default function App() {
   const [priceListId, setPriceListId] = useState("");
   const [priceLists, setPriceLists] = useState<{ id: number; name: string }[]>([]);
   const [validation, setValidation] = useState<any>(null);
+  const [runPreview, setRunPreview] = useState<any>(null);
   const [resultView, setResultView] = useState<"accepted" | "rejected">("accepted");
   const [jobs, setJobs] = useState<any[]>([]);
   const [busy, setBusy] = useState("");
@@ -132,6 +132,7 @@ export default function App() {
   useEffect(() => {
     setPriceListId("");
     setValidation(null);
+    setRunPreview(null);
     if (!activeAccountName) {
       setPriceLists([]);
       return;
@@ -190,6 +191,8 @@ export default function App() {
     if (!activeAccountName) return;
     await run("syncReferences", async () => {
       const result = await engine("syncInventoryReferences", { accountName: activeAccountName });
+      setValidation(null);
+      setRunPreview(null);
       await refreshAccounts(result.account.accountName);
       const lists = await engine("inventoryPriceLists", { accountName: activeAccountName });
       setPriceLists(lists.priceLists);
@@ -207,6 +210,7 @@ export default function App() {
     if (typeof selected === "string") {
       setSourcePath(selected);
       setValidation(null);
+      setRunPreview(null);
     }
   }
 
@@ -220,10 +224,41 @@ export default function App() {
         priceListId: priceListId ? Number(priceListId) : null,
       });
       setValidation(result);
+      setRunPreview(null);
       setResultView(result.inserted > 0 ? "accepted" : "rejected");
       await refreshAccounts(result.account.accountName);
       setActiveTab("data");
       setMessage(`Validation complete: ${result.inserted} accepted, ${result.rejected} rejected for ${activeAccountName}.`);
+    });
+  }
+
+  async function previewRun() {
+    if (!activeAccountName || !validation?.validationJobId) return;
+    await run("previewRun", async () => {
+      const result = await engine("previewInventoryRun", {
+        accountName: activeAccountName,
+        validationJobId: validation.validationJobId,
+      });
+      setRunPreview(result);
+      setActiveTab("data");
+      setMessage(`Dry run prepared ${result.corrections} corrections in ${result.batches} batches. Nothing was sent to Brightpearl.`);
+    });
+  }
+
+  async function saveRunPreview() {
+    if (!runPreview?.reportPath || !activeAccountName) return;
+    const destination = await save({
+      defaultPath: runPreview.reportFileName || "inventory-run-preview.jsonl",
+      filters: [{ name: "JSONL payload report", extensions: ["jsonl"] }],
+    });
+    if (typeof destination !== "string") return;
+    await run("saveRunPreview", async () => {
+      const result = await engine("saveInventoryRunPreview", {
+        accountName: activeAccountName,
+        reportPath: runPreview.reportPath,
+        destination,
+      });
+      setMessage(`Dry-run payload report saved to ${result.path}.`);
     });
   }
 
@@ -352,14 +387,12 @@ export default function App() {
 
         {activeTab === "tasks" && (
           <div className="taskFlow">
-            <section className="step">
-              <div className="stepIndex">1</div>
-              <h2>Account</h2>
+            <section className="step stepAccount">
+              <div className="stepHeading"><span className="stepIndex">1</span><h2>Account</h2></div>
               <p>{activeAccount ? `${activeAccount.accountName} is selected.` : "Register and select an account first."}</p>
             </section>
-            <section className="step">
-              <div className="stepIndex">2</div>
-              <h2>References</h2>
+            <section className="step stepRefs">
+              <div className="stepHeading"><span className="stepIndex">2</span><h2>References</h2></div>
               <div className="counts">
                 {Object.entries(counts).map(([key, value]) => (
                   <span key={key}>{key}: <strong>{value}</strong></span>
@@ -370,12 +403,11 @@ export default function App() {
                 Sync required data
               </button>
             </section>
-            <section className="step">
-              <div className="stepIndex">3</div>
-              <h2>Source</h2>
+            <section className="step stepSource">
+              <div className="stepHeading"><span className="stepIndex">3</span><h2>Source</h2></div>
               <p>Expected columns: {priceListId ? "sku, quantity, locationName, warehouseId" : inventoryHeaders.join(", ")}. Costprice is optional when using a synced price list.</p>
               <div className="sourceRow">
-                <input value={sourcePath} onChange={(event) => { setSourcePath(event.target.value); setValidation(null); }} placeholder="Choose CSV/XLSX source" />
+                <input value={sourcePath} onChange={(event) => { setSourcePath(event.target.value); setValidation(null); setRunPreview(null); }} placeholder="Choose CSV/XLSX source" />
                 <button onClick={chooseSource}>
                   <FolderOpen size={18} />
                   Select
@@ -384,39 +416,37 @@ export default function App() {
               <div className="formGrid">
                 <label>
                   Cost source
-                  <select value={priceListId} onChange={(event) => { setPriceListId(event.target.value); setValidation(null); }}>
+                  <select value={priceListId} onChange={(event) => { setPriceListId(event.target.value); setValidation(null); setRunPreview(null); }}>
                     <option value="">Import file (costprice column)</option>
                     {priceLists.map((list) => <option key={list.id} value={list.id}>{list.name} ({list.id})</option>)}
                   </select>
                 </label>
                 <label className="checkboxLabel">
-                  <input type="checkbox" checked={allowZeroBlanks} onChange={(event) => { setAllowZeroBlanks(event.target.checked); setValidation(null); }} />
+                  <input type="checkbox" checked={allowZeroBlanks} onChange={(event) => { setAllowZeroBlanks(event.target.checked); setValidation(null); setRunPreview(null); }} />
                   Allow zero and blank quantity/cost
                 </label>
               </div>
               <p>{priceListId ? "Cost comes from the selected account's synced price list; costprice in the file is ignored. Missing or blank list values become zero when allowed." : "Cost comes from the import file. Blank quantity or cost becomes zero when allowed."}</p>
             </section>
-            <section className="step">
-              <div className="stepIndex">4</div>
-              <h2>Validate</h2>
+            <section className="step stepValidate">
+              <div className="stepHeading"><span className="stepIndex">4</span><h2>Validate</h2></div>
               <p>{hasReferences ? "References are available for local enrichment." : "Sync products, warehouses and locations before validation."}</p>
               <button onClick={validateSource} disabled={!!busy || !activeAccountName || !sourcePath || !hasReferences}>
                 {busy === "validateSource" ? <Loader2 className="spin" size={18} /> : <FileSearch size={18} />}
                 Validate source
               </button>
             </section>
-            <section className="step">
-              <div className="stepIndex">5</div>
-              <h2>Preview</h2>
+            <section className="step stepPreview">
+              <div className="stepHeading"><span className="stepIndex">5</span><h2>Preview</h2></div>
               <p>{validation ? `${validation.inserted} row(s) staged in validated_inventory.` : "Validation preview appears after source validation."}</p>
             </section>
-            <section className="step">
-              <div className="stepIndex">6</div>
-              <h2>Run</h2>
-              <button className="disabledAction" disabled>
-                <UploadCloud size={18} />
-                Brightpearl writes disabled
+            <section className="step stepRun">
+              <div className="stepHeading"><span className="stepIndex">6</span><h2>Run</h2></div>
+              <button onClick={previewRun} disabled={!!busy || !validation?.inserted}>
+                {busy === "previewRun" ? <Loader2 className="spin" size={18} /> : <FileSearch size={18} />}
+                Dry run
               </button>
+              <p>Build payloads locally. Brightpearl writes remain disabled.</p>
             </section>
           </div>
         )}
@@ -464,6 +494,21 @@ export default function App() {
               {validation && !tableRows.length && <p className="empty">No {resultView} rows.</p>}
             </div>
             {validation && <p className="meta">Showing up to 50 accepted rows and 100 rejected rows.</p>}
+            {runPreview && (
+              <div className="runPreview">
+                <div className="resultHeader">
+                  <div>
+                    <h2>Dry-run payload</h2>
+                    <p>{runPreview.corrections} corrections in {runPreview.batches} batches across {runPreview.warehouses} warehouses. Currency: {runPreview.currency}.</p>
+                  </div>
+                  <button onClick={saveRunPreview} disabled={!!busy}>
+                    <Download size={18} /> Save all payloads
+                  </button>
+                </div>
+                <p className="meta">First {runPreview.samplePayload?.corrections?.length || 0} corrections from the first batch. The saved JSONL contains every full payload.</p>
+                <pre>{JSON.stringify(runPreview.samplePayload, null, 2)}</pre>
+              </div>
+            )}
           </section>
         )}
 

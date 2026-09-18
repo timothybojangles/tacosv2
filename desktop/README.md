@@ -64,6 +64,12 @@ PyInstaller before building the Tauri app. Generated files under
   `validated_inventory.costprice` for the accepted preview. Changing the source
   file or cost options clears the previous result. There is no separate Enhance
   action; the Brightpearl write path remains disabled.
+- Run testing is a local dry run: the worker requires the latest successful
+  account-bound validation and a base currency, then builds stock-correction
+  payloads in warehouse batches using unprocessed validated rows. It writes all
+  request bodies to a downloadable JSONL report and shows a bounded sample.
+  No API POST is made and no inventory row is marked processed. Refreshing
+  references requires validation again before another dry run.
 - Validation streams exception rows to disk, reports progress every 500 rows,
   and creates a SKU index to speed repeated catalogue lookups.
 - Synthetic local CSV import, DuckDB page preview, filter and sort for large-data
@@ -89,16 +95,16 @@ Observed results:
 - Full legacy/migration suite: 51 passed, 2 xfailed.
 - Migration regression file: 20 passed, 2 xfailed.
 - Non-legacy-gap selection: 51 passed, 2 deselected.
-- Worker tests: 8 passed.
+- Worker tests: 9 passed.
 - Frontend build: passed.
 - Cargo check: passed.
 - Tauri NSIS build: produced `TACOS Desktop_0.1.0_x64-setup.exe`.
 
 Measured artifact sizes from this build:
 
-- Release desktop executable: 9,128,960 bytes.
-- Private worker bundle: 63,375,916 bytes.
-- NSIS setup executable with offline WebView2 prerequisite: 237,063,171 bytes.
+- Release desktop executable: 9,129,472 bytes.
+- Private worker bundle: 63,379,218 bytes.
+- NSIS setup executable with offline WebView2 prerequisite: 237,069,721 bytes.
 
 The 20k/200k/2M dataset performance gate still needs measured hardware results
 before the prototype can be treated as accepted.

@@ -111,6 +111,8 @@ fn validate_request(request: &Value) -> Result<(), String> {
         | "validateAccount"
         | "syncInventoryReferences"
         | "inventoryPriceLists"
+        | "previewInventoryRun"
+        | "saveInventoryRunPreview"
         | "validateInventoryFile"
         | "saveInventoryExceptionReport"
         | "jobHistory"
@@ -198,5 +200,14 @@ mod tests {
             "params": {"accountName": "demo"}
         });
         assert!(validate_request(&request).is_ok());
+        for method in ["previewInventoryRun", "saveInventoryRunPreview"] {
+            let request = json!({
+                "protocolVersion": 1,
+                "id": "run-preview-test",
+                "method": method,
+                "params": {"accountName": "demo"}
+            });
+            assert!(validate_request(&request).is_ok());
+        }
     }
 }

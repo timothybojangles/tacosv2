@@ -158,8 +158,20 @@ h2 {
 .taskFlow {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 14px;
+  grid-template-areas:
+    "account refs refs"
+    "source source validate"
+    "preview run run";
+  gap: 10px;
+  align-items: start;
 }
+
+.stepAccount { grid-area: account; }
+.stepRefs { grid-area: refs; }
+.stepSource { grid-area: source; }
+.stepValidate { grid-area: validate; }
+.stepPreview { grid-area: preview; }
+.stepRun { grid-area: run; }
 
 .taskFlow .step {
   min-width: 0;
@@ -207,7 +219,10 @@ h2 {
 .formGrid .checkboxLabel input {
   width: 16px;
   height: 16px;
+  min-width: 16px;
+  min-height: 16px;
   margin: 0;
+  padding: 0;
   flex: none;
 }
 
@@ -225,19 +240,41 @@ h2 {
 }
 
 .step {
-  min-height: 190px;
+  padding: 12px;
+}
+
+.stepHeading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.stepHeading h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.step p {
+  margin-bottom: 10px;
+  font-size: 13px;
+}
+
+.step p:last-child {
+  margin-bottom: 0;
 }
 
 .stepIndex {
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
+  flex: none;
   display: grid;
   place-items: center;
   border-radius: 999px;
   background: #2f80ed;
   color: white;
   font-weight: 700;
-  margin-bottom: 12px;
+  margin: 0;
 }
 
 label {
@@ -256,8 +293,9 @@ label {
 
 .counts {
   display: grid;
-  gap: 6px;
-  margin-bottom: 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 16px;
+  margin-bottom: 10px;
   font-size: 13px;
 }
 
@@ -289,12 +327,18 @@ select {
 @media (max-width: 1320px) {
   .taskFlow {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-areas:
+      "account refs"
+      "source source"
+      "validate preview"
+      "run run";
   }
 }
 
 @media (max-width: 1060px) {
   .taskFlow {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "account" "refs" "source" "validate" "preview" "run";
   }
 }
 
@@ -312,6 +356,36 @@ button:disabled {
 .disabledAction {
   background: #e5e7eb;
   color: #475569;
+}
+
+.stepRun button,
+.runPreview button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  border: 0;
+  border-radius: 8px;
+  padding: 0 12px;
+  background: #23634d;
+  color: white;
+  cursor: pointer;
+}
+
+.runPreview {
+  border-top: 1px solid #d9e1e8;
+  padding-top: 14px;
+  min-width: 0;
+}
+
+.runPreview pre {
+  max-height: 320px;
+  overflow: auto;
+  padding: 12px;
+  background: #f6f7f9;
+  border: 1px solid #d9e1e8;
+  border-radius: 8px;
+  font-size: 12px;
 }
 
 dl {
@@ -352,6 +426,7 @@ dd {
 
 .resultHeader {
   justify-content: space-between;
+  flex-wrap: wrap;
 }
 
 .resultHeader p {

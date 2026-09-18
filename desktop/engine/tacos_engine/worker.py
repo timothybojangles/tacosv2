@@ -5,6 +5,7 @@ import ctypes
 import ctypes.wintypes
 import contextlib
 import json
+import math
 import os
 import re
 import shutil
@@ -20,7 +21,7 @@ from typing import Any
 import duckdb
 import requests
 
-from brightpearl.common import Credentials, connect_sqlite, ensure_account_binding
+from brightpearl.common import Credentials, connect_sqlite, ensure_account_binding, unprocessed_where_clause
 from brightpearl.inventory_import import update_product_catalogue
 from brightpearl.inventory_pricelists import sync_inventory_pricelists
 from brightpearl.settings import get_settings
@@ -489,7 +490,7 @@ def validate_inventory_file(store: Store, request_id: str, params: dict[str, Any
         if not found:
             raise WorkerError("invalid_price_list", "Selected price list is not present in this account's synced references.")
     prepare_legacy_credentials(store, account_name, credentials, account_summary_without_secret(store, account_name).get("baseCurrency"))
-    update_job(store, request_id, kind="inventory_validation", state="running", source_path=str(path))
+    update_job(store, request_id, kind="inventory_validation", state="running", source_path=str(path), dataset_id=account_name)
     logs: list[str] = []
 
     def worker_log(message: str) -> None:
@@ -541,6 +542,7 @@ def validate_inventory_file(store: Store, request_id: str, params: dict[str, Any
     )
     return {
         "inserted": inserted,
+        "validationJobId": request_id,
         "allowZeroBlanks": allow_zero_blanks,
         "priceListId": price_list_id,
         "rejected": rejected,
@@ -553,6 +555,129 @@ def validate_inventory_file(store: Store, request_id: str, params: dict[str, Any
         "exceptionReportPath": str(report_path) if rejected else None,
         "exceptionReportFileName": report_path.name if rejected else None,
     }
+
+
+def preview_inventory_run(store: Store, request_id: str, params: dict[str, Any]) -> dict[str, Any]:
+    account_name = normalize_account_name(params.get("accountName"))
+    validation_id = str(params.get("validationJobId") or "")
+    with sqlite3.connect(store.ledger) as conn:
+        latest = conn.execute(
+            "SELECT id, state, updated_at FROM jobs WHERE kind = 'inventory_validation' AND dataset_id = ? "
+            "ORDER BY updated_at DESC LIMIT 1",
+            (account_name,),
+        ).fetchone()
+        reference_sync = conn.execute(
+            "SELECT last_reference_sync_at FROM accounts WHERE account_name = ?",
+            (account_name,),
+        ).fetchone()
+    if not latest or latest[0] != validation_id or latest[1] not in {"succeeded", "succeeded_with_warnings"}:
+        raise WorkerError("stale_validation", "Validate the current source for this account before previewing a run.")
+
+    account = account_summary_without_secret(store, account_name)
+    if reference_sync and reference_sync[0] and reference_sync[0] > latest[2]:
+        raise WorkerError("stale_validation", "Inventory references changed after validation; validate again before previewing a run.")
+    currency = str(account.get("baseCurrency") or "").strip().upper()
+    if len(currency) != 3 or not currency.isalpha():
+        raise WorkerError("currency_missing", "Check account credentials to sync a three-letter base currency before previewing a run.")
+    db_path = account_data_db(store, account_name)
+    with legacy_cwd(store):
+        batch_size = get_settings().stock_correction_batch_size
+    if not isinstance(batch_size, int) or batch_size < 1:
+        raise WorkerError("invalid_batch_size", "Stock correction batch size must be positive.")
+
+    reports_dir = store.accounts / account_name / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    report_path = reports_dir / f"inventory-run-preview-{int(time.time() * 1000)}.jsonl"
+    correction_count = 0
+    batch_count = 0
+    warehouse_count = 0
+    sample_payload = None
+    current_warehouse = None
+    corrections: list[dict[str, Any]] = []
+
+    def flush_batch(handle) -> None:
+        nonlocal batch_count, sample_payload, corrections
+        if not corrections:
+            return
+        payload = {"accountName": account_name, "warehouseId": str(current_warehouse), "corrections": corrections}
+        handle.write(json.dumps(payload, ensure_ascii=True, separators=(",", ":")) + "\n")
+        if sample_payload is None:
+            sample_payload = {**payload, "corrections": corrections[:10]}
+        batch_count += 1
+        corrections = []
+
+    try:
+        with sqlite3.connect(db_path) as conn, report_path.open("w", encoding="utf-8", newline="") as report:
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute(
+                    "SELECT productId, quantity, locationId, costprice, warehouseId "
+                    f"FROM validated_inventory WHERE {unprocessed_where_clause()} "
+                    "ORDER BY CAST(warehouseId AS INTEGER), id"
+                )
+            except sqlite3.OperationalError as exc:
+                raise WorkerError("no_staged_rows", "Validate inventory before previewing a run.") from exc
+            for row in rows:
+                try:
+                    product_id = int(row["productId"])
+                    warehouse_id = int(row["warehouseId"])
+                    location_id = int(row["locationId"])
+                    quantity = float(row["quantity"])
+                    cost = float(row["costprice"])
+                except (TypeError, ValueError) as exc:
+                    raise WorkerError("invalid_staged_row", "A validated row has missing or invalid payload data; validate again.") from exc
+                if min(product_id, warehouse_id, location_id) < 1 or not math.isfinite(quantity) or not math.isfinite(cost):
+                    raise WorkerError("invalid_staged_row", "A validated row has invalid payload data; validate again.")
+                if current_warehouse != warehouse_id:
+                    flush_batch(report)
+                    current_warehouse = warehouse_id
+                    warehouse_count += 1
+                corrections.append({
+                    "productId": product_id,
+                    "quantity": quantity,
+                    "locationId": location_id,
+                    "cost": {"currency": currency, "value": cost},
+                    "reason": "Stock Sync",
+                })
+                correction_count += 1
+                if len(corrections) >= batch_size:
+                    flush_batch(report)
+            flush_batch(report)
+        if correction_count == 0:
+            raise WorkerError("no_staged_rows", "No unprocessed validated inventory rows are available for a dry run.")
+    except Exception:
+        report_path.unlink(missing_ok=True)
+        raise
+
+    update_job(store, request_id, kind="inventory_run_preview", state="succeeded", dataset_id=account_name,
+               message=f"Dry run: {correction_count} corrections in {batch_count} batches; no API writes.")
+    return {
+        "accountName": account_name,
+        "currency": currency,
+        "corrections": correction_count,
+        "batches": batch_count,
+        "warehouses": warehouse_count,
+        "batchSize": batch_size,
+        "samplePayload": sample_payload,
+        "sampleLimit": 10,
+        "reportPath": str(report_path),
+        "reportFileName": report_path.name,
+        "writeEnabled": False,
+    }
+
+
+def save_inventory_run_preview(store: Store, params: dict[str, Any]) -> dict[str, Any]:
+    account_name = normalize_account_name(params.get("accountName"))
+    reports_dir = (store.accounts / account_name / "reports").resolve()
+    source = Path(str(params.get("reportPath", ""))).resolve()
+    destination = Path(str(params.get("destination", ""))).expanduser().resolve()
+    if not source.is_relative_to(reports_dir) or not source.is_file() or not source.name.startswith("inventory-run-preview-"):
+        raise WorkerError("report_missing", "The dry-run report is no longer available for this account.")
+    if destination.suffix.lower() != ".jsonl" or not destination.parent.is_dir():
+        raise WorkerError("invalid_destination", "Choose a JSONL destination in an existing folder.")
+    if source != destination:
+        shutil.copyfile(source, destination)
+    return {"path": str(destination)}
 
 
 def inventory_price_lists(store: Store, params: dict[str, Any]) -> dict[str, Any]:
@@ -909,6 +1034,10 @@ def handle(store: Store, request: dict[str, Any]) -> None:
             succeed(request_id, validate_inventory_file(store, request_id, params))
         elif method == "inventoryPriceLists":
             succeed(request_id, inventory_price_lists(store, params))
+        elif method == "previewInventoryRun":
+            succeed(request_id, preview_inventory_run(store, request_id, params))
+        elif method == "saveInventoryRunPreview":
+            succeed(request_id, save_inventory_run_preview(store, params))
         elif method == "saveInventoryExceptionReport":
             succeed(request_id, save_inventory_exception_report(store, params))
         elif method == "jobHistory":

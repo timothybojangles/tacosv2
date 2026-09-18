@@ -319,3 +319,80 @@ def test_inventory_validation_uses_account_price_list_and_blank_option(tmp_path,
     result = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
     assert (result["inserted"], result["rejected"]) == (1, 0)
     assert result["validatedPreview"][0]["costprice"] == 0.0
+
+    handle(store, _request("previewInventoryRun", {
+        "accountName": "demo", "validationJobId": result["validationJobId"]
+    }, "preview-no-currency"))
+    missing_currency = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert missing_currency["error"]["code"] == "currency_missing"
+
+    worker.upsert_account_metadata(store, "demo", "euw1", base_currency="GBP")
+    with patch.object(worker.requests, "post") as post:
+        handle(store, _request("previewInventoryRun", {
+            "accountName": "demo", "validationJobId": result["validationJobId"]
+        }, "preview-1"))
+    post.assert_not_called()
+    preview = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
+    assert (preview["corrections"], preview["batches"], preview["warehouses"]) == (1, 1, 1)
+    assert preview["writeEnabled"] is False
+    assert preview["samplePayload"] == {
+        "accountName": "demo",
+        "warehouseId": "1",
+        "corrections": [{
+            "productId": 101, "quantity": 0.0, "locationId": 10,
+            "cost": {"currency": "GBP", "value": 0.0}, "reason": "Stock Sync",
+        }],
+    }
+    with open(preview["reportPath"], encoding="utf-8") as report:
+        assert [json.loads(line) for line in report] == [preview["samplePayload"]]
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT processed FROM validated_inventory").fetchone()[0] == 0
+
+    destination = tmp_path / "dry-run.jsonl"
+    handle(store, _request("saveInventoryRunPreview", {
+        "accountName": "demo", "reportPath": preview["reportPath"], "destination": str(destination)
+    }, "save-preview-1"))
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])["ok"] is True
+    assert json.loads(destination.read_text(encoding="utf-8")) == preview["samplePayload"]
+
+    handle(store, _request("previewInventoryRun", {
+        "accountName": "demo", "validationJobId": "not-the-latest"
+    }, "preview-stale"))
+    stale = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert stale["error"]["code"] == "stale_validation"
+
+
+def test_inventory_dry_run_batches_by_warehouse_and_skips_processed_rows(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))
+    store = app_store()
+    worker.upsert_account_metadata(store, "demo", "euw1", base_currency="GBP")
+    db_path = worker.account_data_db(store, "demo")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE validated_inventory (id INTEGER PRIMARY KEY, productId INTEGER, "
+                     "quantity REAL, locationId INTEGER, costprice REAL, warehouseId TEXT, processed INTEGER)")
+        conn.executemany(
+            "INSERT INTO validated_inventory VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [(index, 100 + index, 1, 10, 2.5, "1", 0) for index in range(1, 52)]
+            + [(52, 152, 2, 20, 3.5, "2", 0), (53, 153, 2, 20, 3.5, "2", 1)],
+        )
+    worker.update_job(store, "validated-demo", kind="inventory_validation", state="succeeded", dataset_id="demo")
+    handle(store, _request("previewInventoryRun", {
+        "accountName": "demo", "validationJobId": "validated-demo"
+    }, "preview-batches"))
+    result = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
+    assert (result["corrections"], result["batches"], result["warehouses"]) == (52, 3, 2)
+    assert len(result["samplePayload"]["corrections"]) == 10
+    with open(result["reportPath"], encoding="utf-8") as report:
+        payloads = [json.loads(line) for line in report]
+    assert [(payload["warehouseId"], len(payload["corrections"])) for payload in payloads] == [
+        ("1", 50), ("1", 1), ("2", 1)
+    ]
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT SUM(processed) FROM validated_inventory").fetchone()[0] == 1
+
+    worker.upsert_account_metadata(store, "demo", "euw1", references_synced=True)
+    handle(store, _request("previewInventoryRun", {
+        "accountName": "demo", "validationJobId": "validated-demo"
+    }, "preview-after-refresh"))
+    refreshed = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert refreshed["error"]["code"] == "stale_validation"
