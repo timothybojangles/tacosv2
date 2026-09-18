@@ -50,6 +50,10 @@ def _ensure_export_tables(conn: sqlite3.Connection) -> None:
             nominalCodeSales TEXT,
             sku TEXT,
             barcode TEXT,
+            ean TEXT,
+            upc TEXT,
+            isbn TEXT,
+            mpn TEXT,
             featured INTEGER,
             stockTracked INTEGER,
             weightMagnitude REAL,
@@ -151,8 +155,20 @@ def _ensure_export_tables(conn: sqlite3.Connection) -> None:
         )
     cur.execute("PRAGMA table_info(export_products)")
     product_columns = {row[1] for row in cur.fetchall()}
-    if "primarySupplierId" not in product_columns:
-        cur.execute("ALTER TABLE export_products ADD COLUMN primarySupplierId INTEGER")
+    product_column_migrations = {
+        "primarySupplierId": "INTEGER",
+        # Older databases predate the complete identity block. Keep this
+        # migration here so users do not need to delete and re-sync their DB.
+        "ean": "TEXT",
+        "upc": "TEXT",
+        "isbn": "TEXT",
+        "mpn": "TEXT",
+    }
+    for column_name, column_type in product_column_migrations.items():
+        if column_name not in product_columns:
+            cur.execute(
+                f"ALTER TABLE export_products ADD COLUMN {column_name} {column_type}"
+            )
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS export_product_warehouses (
@@ -326,6 +342,10 @@ def sync_product_catalogue_export_data(
                     nominalCodeSales,
                     sku,
                     barcode,
+                    ean,
+                    upc,
+                    isbn,
+                    mpn,
                     featured,
                     stockTracked,
                     weightMagnitude,
@@ -347,7 +367,7 @@ def sync_product_catalogue_export_data(
                     salesPopupMessage,
                     version,
                     raw_json
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     product_id,
@@ -360,6 +380,10 @@ def sync_product_catalogue_export_data(
                     product.get("nominalCodeSales"),
                     identity.get("sku"),
                     identity.get("barcode"),
+                    identity.get("ean"),
+                    identity.get("upc"),
+                    identity.get("isbn"),
+                    identity.get("mpn"),
                     int(bool(product.get("featured"))),
                     int(bool(stock.get("stockTracked"))),
                     (stock.get("weight", {}) or {}).get("magnitude"),
@@ -694,6 +718,10 @@ def export_synced_product_catalogue_to_csv(
         "sku",
         "productName",
         "barcode",
+        "ean",
+        "upc",
+        "isbn",
+        "mpn",
         "brandId",
         "categoryCode",
         "categoryName",
