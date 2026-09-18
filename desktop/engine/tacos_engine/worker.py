@@ -4,6 +4,7 @@ import csv
 import ctypes
 import ctypes.wintypes
 import contextlib
+import hashlib
 import json
 import math
 import os
@@ -651,6 +652,7 @@ def preview_inventory_run(store: Store, request_id: str, params: dict[str, Any])
 
     update_job(store, request_id, kind="inventory_run_preview", state="succeeded", dataset_id=account_name,
                message=f"Dry run: {correction_count} corrections in {batch_count} batches; no API writes.")
+    report_sha256 = file_sha256(report_path)
     return {
         "accountName": account_name,
         "currency": currency,
@@ -662,6 +664,7 @@ def preview_inventory_run(store: Store, request_id: str, params: dict[str, Any])
         "sampleLimit": 10,
         "reportPath": str(report_path),
         "reportFileName": report_path.name,
+        "reportSha256": report_sha256,
         "writeEnabled": False,
     }
 
@@ -673,11 +676,24 @@ def save_inventory_run_preview(store: Store, params: dict[str, Any]) -> dict[str
     destination = Path(str(params.get("destination", ""))).expanduser().resolve()
     if not source.is_relative_to(reports_dir) or not source.is_file() or not source.name.startswith("inventory-run-preview-"):
         raise WorkerError("report_missing", "The dry-run report is no longer available for this account.")
+    expected_sha256 = str(params.get("reportSha256") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        raise WorkerError("report_hash_missing", "Rebuild the dry run before exporting its payloads.")
+    if file_sha256(source) != expected_sha256:
+        raise WorkerError("report_changed", "The dry-run report changed after preview; rebuild it before exporting.")
     if destination.suffix.lower() != ".jsonl" or not destination.parent.is_dir():
         raise WorkerError("invalid_destination", "Choose a JSONL destination in an existing folder.")
     if source != destination:
         shutil.copyfile(source, destination)
-    return {"path": str(destination)}
+    return {"path": str(destination), "sha256": expected_sha256}
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def inventory_price_lists(store: Store, params: dict[str, Any]) -> dict[str, Any]:

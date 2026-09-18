@@ -335,6 +335,7 @@ def test_inventory_validation_uses_account_price_list_and_blank_option(tmp_path,
     preview = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
     assert (preview["corrections"], preview["batches"], preview["warehouses"]) == (1, 1, 1)
     assert preview["writeEnabled"] is False
+    assert len(preview["reportSha256"]) == 64
     assert preview["samplePayload"] == {
         "accountName": "demo",
         "warehouseId": "1",
@@ -350,10 +351,19 @@ def test_inventory_validation_uses_account_price_list_and_blank_option(tmp_path,
 
     destination = tmp_path / "dry-run.jsonl"
     handle(store, _request("saveInventoryRunPreview", {
-        "accountName": "demo", "reportPath": preview["reportPath"], "destination": str(destination)
+        "accountName": "demo", "reportPath": preview["reportPath"],
+        "reportSha256": preview["reportSha256"], "destination": str(destination)
     }, "save-preview-1"))
     assert json.loads(capsys.readouterr().out.splitlines()[-1])["ok"] is True
     assert json.loads(destination.read_text(encoding="utf-8")) == preview["samplePayload"]
+
+    with open(preview["reportPath"], "a", encoding="utf-8") as report:
+        report.write("{}\n")
+    handle(store, _request("saveInventoryRunPreview", {
+        "accountName": "demo", "reportPath": preview["reportPath"],
+        "reportSha256": preview["reportSha256"], "destination": str(destination)
+    }, "save-preview-changed"))
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])["error"]["code"] == "report_changed"
 
     handle(store, _request("previewInventoryRun", {
         "accountName": "demo", "validationJobId": "not-the-latest"

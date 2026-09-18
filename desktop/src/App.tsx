@@ -256,6 +256,7 @@ export default function App() {
       const result = await engine("saveInventoryRunPreview", {
         accountName: activeAccountName,
         reportPath: runPreview.reportPath,
+        reportSha256: runPreview.reportSha256,
         destination,
       });
       setMessage(`Dry-run payload report saved to ${result.path}.`);
@@ -505,7 +506,7 @@ export default function App() {
                     <Download size={18} /> Save all payloads
                   </button>
                 </div>
-                <p className="meta">First {runPreview.samplePayload?.corrections?.length || 0} corrections from the first batch. The saved JSONL contains every full payload.</p>
+                <p className="meta">First {runPreview.samplePayload?.corrections?.length || 0} corrections from the first batch. The saved JSONL contains every full payload. SHA-256: <code>{runPreview.reportSha256}</code></p>
                 <pre>{JSON.stringify(runPreview.samplePayload, null, 2)}</pre>
               </div>
             )}

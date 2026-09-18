@@ -68,6 +68,8 @@ PyInstaller before building the Tauri app. Generated files under
   account-bound validation and a base currency, then builds stock-correction
   payloads in warehouse batches using unprocessed validated rows. It writes all
   request bodies to a downloadable JSONL report and shows a bounded sample.
+  The preview displays a SHA-256 digest; export rejects a report changed since
+  preview. This identifies the local payload artifact, not a live-run approval.
   No API POST is made and no inventory row is marked processed. Refreshing
   references requires validation again before another dry run.
 - Validation streams exception rows to disk, reports progress every 500 rows,
