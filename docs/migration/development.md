@@ -49,9 +49,9 @@ Dependency resolution was performed on Windows/Python 3.12 and recorded in
 
 Validation test results after the inventory cost-mode update:
 
-- `.\.venv\Scripts\python.exe -m pytest -q`: 47 passed, 2 xfailed.
-- `.\.venv\Scripts\python.exe -m pytest -q tests/test_migration_regressions.py`: 16 passed, 2 xfailed.
-- `.\.venv\Scripts\python.exe -m pytest -q -m "not legacy_gap"`: 47 passed, 2 deselected.
+- `.\.venv\Scripts\python.exe -m pytest -q`: 51 passed, 2 xfailed.
+- `.\.venv\Scripts\python.exe -m pytest -q tests/test_migration_regressions.py`: 20 passed, 2 xfailed.
+- `.\.venv\Scripts\python.exe -m pytest -q -m "not legacy_gap"`: 51 passed, 2 deselected.
 - `$env:PYTHONPATH = "desktop\engine"; .\.venv\Scripts\python.exe -m pytest -q desktop\engine\tests`: 8 passed.
 
 The inventory location and numeric validation gaps are fixed. The remaining

@@ -55,8 +55,10 @@ PyInstaller before building the Tauri app. Generated files under
   cost values. Blanks become zero when enabled; non-finite numbers remain invalid.
 - Cost can be sourced from the import file or a synced price list belonging to
   the selected account. In price-list mode, file `costprice` is ignored; missing
-  or invalid reference values reject the row. Zero list values require the
-  blank/zero option.
+  or blank reference values resolve to zero only when the blank/zero option is
+  enabled. Malformed non-numeric prices always reject the row. Zero list values
+  require the same option. A SKU absent from the product catalogue still rejects
+  because its product ID cannot be used for a price-list lookup.
 - Price-list workflow: select the account, sync inventory references, choose a
   cost source, then validate. Validation stores the resolved cost in
   `validated_inventory.costprice` for the accepted preview. Changing the source
@@ -71,7 +73,7 @@ PyInstaller before building the Tauri app. Generated files under
 
 ## Current verification
 
-Run on Tim's Windows checkout on 2026-09-16:
+Run on Tim's Windows checkout on 2026-09-18:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q
@@ -84,9 +86,9 @@ Set-Location ..; npm run tauri:build
 
 Observed results:
 
-- Full legacy/migration suite: 47 passed, 2 xfailed.
-- Migration regression file: 16 passed, 2 xfailed.
-- Non-legacy-gap selection: 47 passed, 2 deselected.
+- Full legacy/migration suite: 51 passed, 2 xfailed.
+- Migration regression file: 20 passed, 2 xfailed.
+- Non-legacy-gap selection: 51 passed, 2 deselected.
 - Worker tests: 8 passed.
 - Frontend build: passed.
 - Cargo check: passed.
@@ -95,8 +97,8 @@ Observed results:
 Measured artifact sizes from this build:
 
 - Release desktop executable: 9,128,960 bytes.
-- Private worker bundle: 63,375,812 bytes.
-- NSIS setup executable with offline WebView2 prerequisite: 236,878,241 bytes.
+- Private worker bundle: 63,375,916 bytes.
+- NSIS setup executable with offline WebView2 prerequisite: 237,063,171 bytes.
 
 The 20k/200k/2M dataset performance gate still needs measured hardware results
 before the prototype can be treated as accepted.

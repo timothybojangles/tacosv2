@@ -156,7 +156,15 @@ def test_inventory_zero_and_blank_option(tmp_path, inventory_db, quantity, cost,
             assert conn.execute("SELECT quantity, costprice FROM validated_inventory").fetchone() == (0.0, 0.0)
 
 
-@pytest.mark.parametrize("price,allowed,expected", [("12.50", False, 1), (0, True, 1), (0, False, 0), (None, True, 0)])
+@pytest.mark.parametrize("price,allowed,expected", [
+    ("12.50", False, 1),
+    (0, True, 1),
+    (0, False, 0),
+    (None, True, 1),
+    (None, False, 0),
+    ("", True, 1),
+    ("not-a-number", True, 0),
+])
 def test_inventory_cost_from_synced_price_list(tmp_path, inventory_db, price, allowed, expected):
     with sqlite3.connect(inventory_db) as conn:
         conn.execute("CREATE TABLE ref_price_lists (priceListId INTEGER, name TEXT, code TEXT)")
@@ -177,10 +185,29 @@ def test_inventory_cost_from_synced_price_list(tmp_path, inventory_db, price, al
         ) == expected
     if expected:
         with sqlite3.connect(inventory_db) as conn:
-            assert conn.execute("SELECT costprice FROM validated_inventory").fetchone()[0] == float(price)
+            assert conn.execute("SELECT costprice FROM validated_inventory").fetchone()[0] == float(price or 0)
     else:
         with (tmp_path / "errors" / "synthetic_inventory_rejected.csv").open(encoding="utf-8") as handle:
-            assert "price list" in list(csv.DictReader(handle))[0]["validation_error"].lower()
+            rejected = list(csv.DictReader(handle))[0]
+        assert rejected["validation_categories"] == "missing_required"
+        assert "price list" in rejected["validation_error"].lower()
+
+
+def test_unmatched_inventory_sku_is_not_hidden_by_blank_price_option(tmp_path, inventory_db):
+    with sqlite3.connect(inventory_db) as conn:
+        conn.execute("CREATE TABLE ref_price_lists (priceListId INTEGER, name TEXT)")
+        conn.execute("INSERT INTO ref_price_lists VALUES (7, 'Cost')")
+    source = tmp_path / "stock.csv"
+    source.write_text("sku,warehouseId,locationId,quantity\nUNKNOWN,1,10,3\n", encoding="utf-8")
+    with patch.object(validator, "log"), patch.object(
+        validator, "get_settings", return_value=SimpleNamespace(unmatched_output_dir=str(tmp_path / "errors"))
+    ):
+        assert validator.validate_and_enrich_inventory(
+            str(source), str(inventory_db), "synthetic", allow_zero_blanks=True, price_list_id=7
+        ) == 0
+    with (tmp_path / "errors" / "synthetic_inventory_rejected.csv").open(encoding="utf-8") as handle:
+        rejected = list(csv.DictReader(handle))[0]
+    assert rejected["validation_categories"] == "unmatched_sku"
 
 
 @pytest.mark.legacy_gap

@@ -310,3 +310,12 @@ def test_inventory_validation_uses_account_price_list_and_blank_option(tmp_path,
     assert (result["inserted"], result["rejected"], result["priceListId"]) == (1, 0, 7)
     assert result["validatedPreview"][0]["quantity"] == 0.0
     assert result["validatedPreview"][0]["costprice"] == 12.5
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DELETE FROM ref_price_list_values WHERE productId = 101 AND priceListId = 7")
+    handle(store, _request("validateInventoryFile", {
+        "accountName": "demo", "path": str(source), "allowZeroBlanks": True, "priceListId": 7
+    }, "validate-2"))
+    result = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
+    assert (result["inserted"], result["rejected"]) == (1, 0)
+    assert result["validatedPreview"][0]["costprice"] == 0.0

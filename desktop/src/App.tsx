@@ -394,7 +394,7 @@ export default function App() {
                   Allow zero and blank quantity/cost
                 </label>
               </div>
-              <p>{priceListId ? "Cost comes from the selected account's synced price list; costprice in the file is ignored." : "Cost comes from the import file."} Blank values become zero when allowed.</p>
+              <p>{priceListId ? "Cost comes from the selected account's synced price list; costprice in the file is ignored. Missing or blank list values become zero when allowed." : "Cost comes from the import file. Blank quantity or cost becomes zero when allowed."}</p>
             </section>
             <section className="step">
               <div className="stepIndex">4</div>

@@ -269,11 +269,19 @@ def validate_and_enrich_inventory(csv_path, db_path, account_name, region=None, 
                         (result[0], price_list_id),
                     )
                     price_row = cur.fetchone()
-                    parsed_costprice = _parse_decimal(price_row[0]) if price_row else None
-                    if parsed_costprice is None:
-                        reject("missing_required", "No valid value in the selected price list")
-                    elif not allow_zero_blanks and parsed_costprice == 0.0:
-                        reject("missing_required", "Price list value must be non-zero")
+                    price_value = price_row[0] if price_row else None
+                    if price_value is None or str(price_value).strip() == "":
+                        if allow_zero_blanks:
+                            parsed_costprice = 0.0
+                        else:
+                            parsed_costprice = None
+                            reject("missing_required", "No value in the selected price list")
+                    else:
+                        parsed_costprice = _parse_decimal(price_value)
+                        if parsed_costprice is None:
+                            reject("missing_required", "Price list value must be a finite number")
+                        elif not allow_zero_blanks and parsed_costprice == 0.0:
+                            reject("missing_required", "Price list value must be non-zero")
 
                 if categories:
                     if "missing_required" in categories:
