@@ -15,7 +15,7 @@ import {
   RefreshCw,
   Settings,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type WorkerResponse =
   | { ok: true; result: any }
@@ -107,6 +107,10 @@ export default function App() {
   const [priceLists, setPriceLists] = useState<{ id: number; name: string }[]>([]);
   const [validation, setValidation] = useState<any>(null);
   const [runPreview, setRunPreview] = useState<any>(null);
+  const [liveConfirm, setLiveConfirm] = useState("");
+  const [liveProgress, setLiveProgress] = useState<{ completed: number; total: number; done: boolean } | null>(null);
+  const [liveBatches, setLiveBatches] = useState<any[]>([]);
+  const stopLive = useRef(false);
   const [resultView, setResultView] = useState<"accepted" | "rejected">("accepted");
   const [jobs, setJobs] = useState<any[]>([]);
   const [busy, setBusy] = useState("");
@@ -133,6 +137,9 @@ export default function App() {
     setPriceListId("");
     setValidation(null);
     setRunPreview(null);
+    setLiveConfirm("");
+    setLiveProgress(null);
+    setLiveBatches([]);
     if (!activeAccountName) {
       setPriceLists([]);
       return;
@@ -146,6 +153,17 @@ export default function App() {
           setError(`Could not load price lists: ${errorMessage(err)}`);
         }
       });
+    void engine("inventoryLiveStatus", { accountName: activeAccountName })
+      .then((result) => { if (current) setLiveBatches(result.batches); })
+      .catch(() => { if (current) setLiveBatches([]); });
+    void engine("inventoryRunResume", { accountName: activeAccountName })
+      .then((result) => {
+        if (current && result.preview) {
+          setRunPreview(result.preview);
+          setLiveProgress({ completed: result.completedBatches, total: result.preview.batches, done: false });
+        }
+      })
+      .catch((err) => { if (current) setError(`Could not restore live run: ${errorMessage(err)}`); });
     return () => { current = false; };
   }, [activeAccountName]);
 
@@ -240,6 +258,8 @@ export default function App() {
         validationJobId: validation.validationJobId,
       });
       setRunPreview(result);
+      setLiveConfirm("");
+      setLiveProgress(null);
       setActiveTab("data");
       setMessage(`Dry run prepared ${result.corrections} corrections in ${result.batches} batches. Nothing was sent to Brightpearl.`);
     });
@@ -260,6 +280,39 @@ export default function App() {
         destination,
       });
       setMessage(`Dry-run payload report saved to ${result.path}.`);
+    });
+  }
+
+  async function runLive() {
+    if (!runPreview || !activeAccountName || liveConfirm !== activeAccountName) return;
+    const accountName = activeAccountName;
+    const preview = runPreview;
+    stopLive.current = false;
+    await run("runLive", async () => {
+      try {
+        for (;;) {
+          if (stopLive.current) {
+            setMessage(`Live run paused for ${accountName}. Resume to send remaining batches.`);
+            break;
+          }
+          const result = await engine("runInventoryBatch", {
+            accountName,
+            confirmAccountName: liveConfirm,
+            validationJobId: preview.validationJobId,
+            previewJobId: preview.previewJobId,
+            reportSha256: preview.reportSha256,
+          });
+          setLiveProgress({ completed: result.completedBatches, total: result.totalBatches, done: result.done });
+          if (result.done) {
+            setMessage(`Live run complete for ${accountName}: ${result.completedBatches} batches confirmed by Brightpearl.`);
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, result.waitMs));
+        }
+      } finally {
+        const status = await engine("inventoryLiveStatus", { accountName });
+        setLiveBatches(status.batches);
+      }
     });
   }
 
@@ -298,7 +351,7 @@ export default function App() {
           </div>
         </div>
         <label className="sideLabel" htmlFor="activeAccount">Active account</label>
-        <select id="activeAccount" value={activeAccountName} onChange={(event) => setActiveAccountName(event.target.value)}>
+        <select id="activeAccount" value={activeAccountName} disabled={busy === "runLive"} onChange={(event) => setActiveAccountName(event.target.value)}>
           <option value="">No account</option>
           {accounts.map((account) => (
             <option key={account.accountName} value={account.accountName}>{account.accountName}</option>
@@ -311,6 +364,7 @@ export default function App() {
               <button
                 key={tab.id}
                 className={activeTab === tab.id ? "active" : ""}
+                disabled={busy === "runLive"}
                 onClick={() => {
                   setActiveTab(tab.id);
                   if (tab.id === "history") void refreshHistory();
@@ -328,7 +382,7 @@ export default function App() {
         <header>
           <div>
             <h1>Inventory Import</h1>
-            <p>Account-bound Brightpearl read sync, local validation and disabled write path.</p>
+            <p>Account-bound Brightpearl sync, local validation and confirmed stock corrections.</p>
           </div>
           <span className="account"><Lock size={14} /> {activeAccountName || "No active account"}</span>
         </header>
@@ -447,7 +501,7 @@ export default function App() {
                 {busy === "previewRun" ? <Loader2 className="spin" size={18} /> : <FileSearch size={18} />}
                 Dry run
               </button>
-              <p>Build payloads locally. Brightpearl writes remain disabled.</p>
+              <p>Review the dry-run payload in Data before confirming a live run.</p>
             </section>
           </div>
         )}
@@ -507,6 +561,27 @@ export default function App() {
                   </button>
                 </div>
                 <p className="meta">First {runPreview.samplePayload?.corrections?.length || 0} corrections from the first batch. The saved JSONL contains every full payload. SHA-256: <code>{runPreview.reportSha256}</code></p>
+                <div className="liveControls">
+                  <p>Quantities are <strong>additive adjustments</strong>, not target stock levels. Confirm <strong>{activeAccountName}</strong> to send all {runPreview.corrections} corrections. An uncertain batch stops the run for reconciliation.</p>
+                  <input aria-label="Confirm account name for live run" placeholder="Type account name" value={liveConfirm} disabled={!!busy || !!liveProgress?.done} onChange={(event) => setLiveConfirm(event.target.value)} />
+                  <button onClick={runLive} disabled={!!busy || !!liveProgress?.done || liveConfirm !== activeAccountName}>
+                    {busy === "runLive" ? <Loader2 className="spin" size={18} /> : <CheckCircle2 size={18} />}
+                    {liveProgress?.completed ? "Resume live run" : "Run live"}
+                  </button>
+                  {busy === "runLive" && <button onClick={() => { stopLive.current = true; }}><AlertTriangle size={18} /> Stop after batch</button>}
+                  {liveProgress && <span>{liveProgress.completed} of {liveProgress.total} batches confirmed</span>}
+                </div>
+                {liveBatches.length > 0 && (
+                  <div className="liveBatchStatus">
+                    <strong>Recent live batches</strong>
+                    {liveBatches.slice(0, 10).map((batch) => (
+                      <div key={`${batch.batchIndex}-${batch.updatedAt}`}>
+                        Batch {batch.batchIndex}, warehouse {batch.warehouseId}: {batch.state}, {batch.rowCount} rows
+                        {batch.goodsNoteIds.length > 0 && `, notes ${batch.goodsNoteIds.join(", ")}`}
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <pre>{JSON.stringify(runPreview.samplePayload, null, 2)}</pre>
               </div>
             )}

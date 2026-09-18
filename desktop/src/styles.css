@@ -388,6 +388,32 @@ button:disabled {
   font-size: 12px;
 }
 
+.liveControls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 12px 0;
+}
+
+.liveControls p {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+.liveControls input {
+  flex: 0 1 220px;
+  min-width: 0;
+}
+
+.liveBatchStatus {
+  margin: 4px 0 12px;
+  padding: 10px 0;
+  border-top: 1px solid #d9e1e8;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
 dl {
   display: grid;
   grid-template-columns: max-content 1fr;

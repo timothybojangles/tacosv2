@@ -64,7 +64,7 @@ PyInstaller before building the Tauri app. Generated files under
   `validated_inventory.costprice` for the accepted preview. Changing the source
   file or cost options clears the previous result. There is no separate Enhance
   action; the Brightpearl write path remains disabled.
-- Run testing is a local dry run: the worker requires the latest successful
+- Dry-run preview is local: the worker requires the latest successful
   account-bound validation and a base currency, then builds stock-correction
   payloads in warehouse batches using unprocessed validated rows. It writes all
   request bodies to a downloadable JSONL report and shows a bounded sample.
@@ -76,7 +76,25 @@ PyInstaller before building the Tauri app. Generated files under
   and creates a SKU index to speed repeated catalogue lookups.
 - Synthetic local CSV import, DuckDB page preview, filter and sort for large-data
   prototype work.
-- Remote stock-correction writes are disabled in the UI.
+- Live stock corrections are available only after a current account-bound
+  validation, reviewed dry run, and typed account-name confirmation. The UI
+  submits every batch in order and can stop between batches. There is no
+  arbitrary correction count cap. Brightpearl requires whole-number adjustment
+  quantities; fractional quantities fail the dry run before any write. Values
+  are additive stock adjustments, not target on-hand quantities.
+- The worker sends only the documented `corrections` request body over verified
+  HTTPS. Each batch is recorded as `sending` before POST. A confirmed response
+  marks its source rows processed in the same local transaction as the batch
+  success record. Timeouts, unexpected responses, or process death leave an
+  uncertain batch that blocks further writes; it is never automatically retried.
+  Reconcile that batch's warehouse, row count, and time against Brightpearl
+  stock-correction notes before attempting any further run. Revalidating the
+  same source can create new staged rows, so do not use it as a retry action.
+  The app restores an unfinished run after restart and blocks credential edits,
+  reference refreshes and revalidation while it remains open.
+- This live path has been tested with mocked HTTP. The operator must choose and
+  review a sandbox account/source in the desktop UI before a real sandbox run;
+  no production account or live write was used during implementation.
 - Local-only update proof notes under `update-proof/`.
 
 ## Current verification
@@ -92,7 +110,7 @@ Set-Location desktop; npm run build; Set-Location src-tauri; cargo check
 Set-Location ..; npm run tauri:build
 ```
 
-Observed results:
+Baseline results recorded before the live-run change:
 
 - Full legacy/migration suite: 51 passed, 2 xfailed.
 - Migration regression file: 20 passed, 2 xfailed.
@@ -107,6 +125,17 @@ Measured artifact sizes from this build:
 - Release desktop executable: 9,129,472 bytes.
 - Private worker bundle: 63,379,218 bytes.
 - NSIS setup executable with offline WebView2 prerequisite: 237,069,721 bytes.
+
+Live-run build verification on 2026-09-18 used an isolated Python 3.13.3
+environment because the existing `.venv` still points to an unavailable
+Python 3.12 executable. This is a test build, not a refreshed Python 3.12 lock:
+
+- `pytest -q tests desktop/engine/tests`: 64 passed, 2 strict xfailed.
+- Frontend build and Cargo tests: passed (1 Rust test).
+- Packaged worker CSV smoke test: passed.
+- NSIS 0.1.1 installer: 237,362,391 bytes; SHA-256
+  `19A9B4A4B9EB91690F066F3A5B0DE0B26AE0F478D10043F1D3C33E4554904909`.
+- Sandbox live POST: not yet exercised; all new endpoint tests used mocked HTTP.
 
 The 20k/200k/2M dataset performance gate still needs measured hardware results
 before the prototype can be treated as accepted.

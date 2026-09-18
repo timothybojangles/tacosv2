@@ -406,3 +406,111 @@ def test_inventory_dry_run_batches_by_warehouse_and_skips_processed_rows(tmp_pat
     }, "preview-after-refresh"))
     refreshed = json.loads(capsys.readouterr().out.splitlines()[-1])
     assert refreshed["error"]["code"] == "stale_validation"
+
+
+def _live_run_fixture(tmp_path, monkeypatch, capsys, quantities=(1, 2)):
+    monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))
+    monkeypatch.setenv("TACOS_CREDENTIAL_BACKEND", "sqlite_plaintext")
+    store = app_store()
+    worker.save_credential("demo", "app", "secret")
+    worker.upsert_account_metadata(store, "demo", "euw1", base_currency="GBP")
+    db_path = worker.account_data_db(store, "demo")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE validated_inventory (id INTEGER PRIMARY KEY, productId INTEGER, "
+                     "quantity REAL, locationId INTEGER, costprice REAL, warehouseId TEXT, processed INTEGER)")
+        conn.executemany("INSERT INTO validated_inventory VALUES (?, ?, ?, ?, ?, ?, 0)", [
+            (index, 100 + index, quantity, 10, 2.5, str(index))
+            for index, quantity in enumerate(quantities, 1)
+        ])
+    worker.update_job(store, "validated-demo", kind="inventory_validation", state="succeeded", dataset_id="demo")
+    handle(store, _request("previewInventoryRun", {
+        "accountName": "demo", "validationJobId": "validated-demo"
+    }, "preview-live"))
+    preview = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
+    params = {
+        "accountName": "demo", "confirmAccountName": "demo",
+        "validationJobId": preview["validationJobId"],
+        "previewJobId": preview["previewJobId"], "reportSha256": preview["reportSha256"],
+    }
+    return store, db_path, params
+
+
+def test_live_inventory_batches_confirm_and_mark_only_successful_rows(tmp_path, monkeypatch, capsys):
+    store, db_path, params = _live_run_fixture(tmp_path, monkeypatch, capsys)
+    response = SimpleNamespace(status_code=200, headers={}, json=lambda: {"response": [901]})
+    with patch.object(worker.requests, "post", return_value=response) as post:
+        handle(store, _request("runInventoryBatch", {**params, "confirmAccountName": "other"}, "wrong-account"))
+        assert json.loads(capsys.readouterr().out.splitlines()[-1])["error"]["code"] == "confirmation_required"
+        post.assert_not_called()
+        handle(store, _request("runInventoryBatch", params, "live-1"))
+        first = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
+        assert (first["completedBatches"], first["totalBatches"], first["done"]) == (1, 2, False)
+        assert post.call_args.kwargs["json"] == {"corrections": [{
+            "productId": 101, "quantity": 1, "locationId": 10,
+            "cost": {"currency": "GBP", "value": 2.5}, "reason": "Stock Sync",
+        }]}
+        assert post.call_args.kwargs["timeout"] == (10, 60)
+        with sqlite3.connect(db_path) as conn:
+            assert conn.execute("SELECT processed FROM validated_inventory ORDER BY id").fetchall() == [(1,), (0,)]
+        handle(app_store(), _request("inventoryRunResume", {"accountName": "demo"}, "resume-live"))
+        resume = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
+        assert resume["completedBatches"] == 1
+        assert resume["preview"]["reportSha256"] == params["reportSha256"]
+        handle(store, _request("previewInventoryRun", {
+            "accountName": "demo", "validationJobId": "validated-demo"
+        }, "new-preview-during-live"))
+        assert json.loads(capsys.readouterr().out.splitlines()[-1])["error"]["code"] == "resume_required"
+        handle(store, _request("validateInventoryFile", {"accountName": "demo", "path": "unused.csv"}, "revalidate-during-live"))
+        assert json.loads(capsys.readouterr().out.splitlines()[-1])["error"]["code"] == "resume_required"
+        handle(store, _request("runInventoryBatch", params, "live-2"))
+        second = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
+        assert second["done"] is True
+        assert post.call_count == 2
+        handle(store, _request("inventoryLiveStatus", {"accountName": "demo"}, "live-status"))
+        status = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
+        assert len(status["batches"]) == 2
+        assert all(batch["state"] == "succeeded" and batch["goodsNoteIds"] == [901] for batch in status["batches"])
+        handle(store, _request("runInventoryBatch", params, "live-repeat"))
+        assert json.loads(capsys.readouterr().out.splitlines()[-1])["error"]["code"] == "already_run"
+        assert post.call_count == 2
+
+
+def test_live_inventory_timeout_blocks_retry_and_preserves_rows(tmp_path, monkeypatch, capsys):
+    store, db_path, params = _live_run_fixture(tmp_path, monkeypatch, capsys, quantities=(1,))
+    with patch.object(worker.requests, "post", side_effect=worker.requests.Timeout) as post:
+        handle(store, _request("runInventoryBatch", params, "live-timeout"))
+        assert json.loads(capsys.readouterr().out.splitlines()[-1])["error"]["code"] == "write_uncertain"
+        handle(store, _request("runInventoryBatch", params, "live-retry"))
+        assert json.loads(capsys.readouterr().out.splitlines()[-1])["error"]["code"] == "reconciliation_required"
+        assert post.call_count == 1
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT processed FROM validated_inventory").fetchone()[0] == 0
+        assert conn.execute("SELECT state FROM inventory_live_batches").fetchone()[0] == "unknown"
+
+
+def test_live_inventory_rechecks_staged_rows_before_post(tmp_path, monkeypatch, capsys):
+    store, db_path, params = _live_run_fixture(tmp_path, monkeypatch, capsys, quantities=(1,))
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("UPDATE validated_inventory SET quantity = 9 WHERE id = 1")
+    with patch.object(worker.requests, "post") as post:
+        handle(store, _request("runInventoryBatch", params, "live-changed"))
+        assert json.loads(capsys.readouterr().out.splitlines()[-1])["error"]["code"] == "staged_rows_changed"
+        post.assert_not_called()
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM inventory_live_runs").fetchone()[0] == 0
+
+
+def test_dry_run_rejects_fractional_stock_correction_quantity(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))
+    store = app_store()
+    worker.upsert_account_metadata(store, "demo", "euw1", base_currency="GBP")
+    db_path = worker.account_data_db(store, "demo")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE validated_inventory (id INTEGER PRIMARY KEY, productId INTEGER, "
+                     "quantity REAL, locationId INTEGER, costprice REAL, warehouseId TEXT, processed INTEGER)")
+        conn.execute("INSERT INTO validated_inventory VALUES (1, 101, 1.5, 10, 2.5, '1', 0)")
+    worker.update_job(store, "validated-demo", kind="inventory_validation", state="succeeded", dataset_id="demo")
+    handle(store, _request("previewInventoryRun", {
+        "accountName": "demo", "validationJobId": "validated-demo"
+    }, "preview-fractional"))
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])["error"]["code"] == "fractional_quantity"

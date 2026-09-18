@@ -22,7 +22,8 @@ from typing import Any
 import duckdb
 import requests
 
-from brightpearl.common import Credentials, connect_sqlite, ensure_account_binding, unprocessed_where_clause
+from brightpearl.common import Credentials, connect_sqlite, ensure_account_binding, mark_rows_processed, unprocessed_where_clause
+from brightpearl.throttle import parse_int_header, throttle_decision
 from brightpearl.inventory_import import update_product_catalogue
 from brightpearl.inventory_pricelists import sync_inventory_pricelists
 from brightpearl.settings import get_settings
@@ -148,6 +149,16 @@ def account_data_db(store: Store, account_name: str) -> Path:
     path = folder / "brightpearl_data.sqlite"
     ensure_account_binding(str(path), safe)
     return path
+
+
+def ensure_no_open_inventory_run(store: Store, account_name: str) -> None:
+    with sqlite3.connect(account_data_db(store, account_name)) as conn:
+        try:
+            open_run = conn.execute("SELECT 1 FROM inventory_live_runs WHERE state = 'running' LIMIT 1").fetchone()
+        except sqlite3.OperationalError:
+            open_run = None
+    if open_run:
+        raise WorkerError("resume_required", "This account has an unfinished live inventory run; resume or reconcile it before changing credentials, references or staged rows.")
 
 
 @contextlib.contextmanager
@@ -371,6 +382,7 @@ def list_accounts(store: Store) -> dict[str, Any]:
 
 def save_account(store: Store, params: dict[str, Any]) -> dict[str, Any]:
     account_name = normalize_account_name(params.get("accountName"))
+    ensure_no_open_inventory_run(store, account_name)
     region = str(params.get("region", "")).strip()
     app_ref = str(params.get("appRef", "")).strip()
     token = str(params.get("token", "")).strip()
@@ -396,6 +408,7 @@ def credentials_for_account(store: Store, account_name: str) -> Credentials:
 
 def validate_account(store: Store, params: dict[str, Any]) -> dict[str, Any]:
     account_name = normalize_account_name(params.get("accountName"))
+    ensure_no_open_inventory_run(store, account_name)
     credentials = credentials_for_account(store, account_name)
     url = (
         f"https://{credentials.region}.brightpearlconnect.com/public-api/{account_name}/"
@@ -416,6 +429,7 @@ def validate_account(store: Store, params: dict[str, Any]) -> dict[str, Any]:
 
 def sync_inventory_references(store: Store, request_id: str, params: dict[str, Any]) -> dict[str, Any]:
     account_name = normalize_account_name(params.get("accountName"))
+    ensure_no_open_inventory_run(store, account_name)
     credentials = credentials_for_account(store, account_name)
     db_path = account_data_db(store, account_name)
     base_currency = account_summary_without_secret(store, account_name).get("baseCurrency")
@@ -467,6 +481,7 @@ def sync_inventory_references(store: Store, request_id: str, params: dict[str, A
 
 def validate_inventory_file(store: Store, request_id: str, params: dict[str, Any]) -> dict[str, Any]:
     account_name = normalize_account_name(params.get("accountName"))
+    ensure_no_open_inventory_run(store, account_name)
     path = Path(str(params.get("path", ""))).expanduser()
     if not path.exists() or not path.is_file():
         raise WorkerError("source_missing", "Choose an existing local CSV or XLSX file.")
@@ -558,9 +573,7 @@ def validate_inventory_file(store: Store, request_id: str, params: dict[str, Any
     }
 
 
-def preview_inventory_run(store: Store, request_id: str, params: dict[str, Any]) -> dict[str, Any]:
-    account_name = normalize_account_name(params.get("accountName"))
-    validation_id = str(params.get("validationJobId") or "")
+def current_inventory_validation(store: Store, account_name: str, validation_id: str) -> tuple[str, Path, int]:
     with sqlite3.connect(store.ledger) as conn:
         latest = conn.execute(
             "SELECT id, state, updated_at FROM jobs WHERE kind = 'inventory_validation' AND dataset_id = ? "
@@ -585,6 +598,20 @@ def preview_inventory_run(store: Store, request_id: str, params: dict[str, Any])
         batch_size = get_settings().stock_correction_batch_size
     if not isinstance(batch_size, int) or batch_size < 1:
         raise WorkerError("invalid_batch_size", "Stock correction batch size must be positive.")
+    return currency, db_path, batch_size
+
+
+def preview_inventory_run(store: Store, request_id: str, params: dict[str, Any]) -> dict[str, Any]:
+    account_name = normalize_account_name(params.get("accountName"))
+    validation_id = str(params.get("validationJobId") or "")
+    currency, db_path, batch_size = current_inventory_validation(store, account_name, validation_id)
+    with sqlite3.connect(db_path) as conn:
+        try:
+            open_run = conn.execute("SELECT 1 FROM inventory_live_runs WHERE state = 'running' LIMIT 1").fetchone()
+        except sqlite3.OperationalError:
+            open_run = None
+    if open_run:
+        raise WorkerError("resume_required", "An inventory live run is in progress for this account; resume or reconcile it before another dry run.")
 
     reports_dir = store.accounts / account_name / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
@@ -629,13 +656,15 @@ def preview_inventory_run(store: Store, request_id: str, params: dict[str, Any])
                     raise WorkerError("invalid_staged_row", "A validated row has missing or invalid payload data; validate again.") from exc
                 if min(product_id, warehouse_id, location_id) < 1 or not math.isfinite(quantity) or not math.isfinite(cost):
                     raise WorkerError("invalid_staged_row", "A validated row has invalid payload data; validate again.")
+                if not quantity.is_integer():
+                    raise WorkerError("fractional_quantity", "Brightpearl stock corrections require whole-number quantities; fix and validate the source again.")
                 if current_warehouse != warehouse_id:
                     flush_batch(report)
                     current_warehouse = warehouse_id
                     warehouse_count += 1
                 corrections.append({
                     "productId": product_id,
-                    "quantity": quantity,
+                    "quantity": int(quantity),
                     "locationId": location_id,
                     "cost": {"currency": currency, "value": cost},
                     "reason": "Stock Sync",
@@ -651,6 +680,7 @@ def preview_inventory_run(store: Store, request_id: str, params: dict[str, Any])
         raise
 
     update_job(store, request_id, kind="inventory_run_preview", state="succeeded", dataset_id=account_name,
+               source_path=str(report_path),
                message=f"Dry run: {correction_count} corrections in {batch_count} batches; no API writes.")
     report_sha256 = file_sha256(report_path)
     return {
@@ -665,6 +695,8 @@ def preview_inventory_run(store: Store, request_id: str, params: dict[str, Any])
         "reportPath": str(report_path),
         "reportFileName": report_path.name,
         "reportSha256": report_sha256,
+        "previewJobId": request_id,
+        "validationJobId": validation_id,
         "writeEnabled": False,
     }
 
@@ -694,6 +726,242 @@ def file_sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def run_inventory_batch(store: Store, request_id: str, params: dict[str, Any]) -> dict[str, Any]:
+    account_name = normalize_account_name(params.get("accountName"))
+    if params.get("confirmAccountName") != account_name:
+        raise WorkerError("confirmation_required", "Type the selected account name to confirm live stock corrections.")
+    validation_id = str(params.get("validationJobId") or "")
+    currency, db_path, batch_size = current_inventory_validation(store, account_name, validation_id)
+    preview_id = str(params.get("previewJobId") or "")
+    report_hash = str(params.get("reportSha256") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", report_hash):
+        raise WorkerError("report_hash_missing", "Build a new dry run before starting live corrections.")
+    with sqlite3.connect(store.ledger) as conn:
+        preview_job = conn.execute(
+            "SELECT source_path, state FROM jobs WHERE id = ? AND kind = 'inventory_run_preview' AND dataset_id = ?",
+            (preview_id, account_name),
+        ).fetchone()
+    if not preview_job or preview_job[1] != "succeeded":
+        raise WorkerError("preview_missing", "The account-bound dry run is no longer available.")
+    reports_dir = (store.accounts / account_name / "reports").resolve()
+    report_path = Path(preview_job[0]).resolve()
+    if not report_path.is_relative_to(reports_dir) or not report_path.is_file():
+        raise WorkerError("report_missing", "The dry-run report is no longer available for this account.")
+
+    credentials = credentials_for_account(store, account_name)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS inventory_live_runs (
+                report_sha256 TEXT PRIMARY KEY,
+                preview_job_id TEXT NOT NULL,
+                validation_job_id TEXT NOT NULL,
+                total_batches INTEGER NOT NULL,
+                state TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS inventory_live_batches (
+                report_sha256 TEXT NOT NULL,
+                batch_index INTEGER NOT NULL,
+                warehouse_id INTEGER NOT NULL,
+                row_ids TEXT NOT NULL,
+                payload_sha256 TEXT NOT NULL,
+                state TEXT NOT NULL,
+                goods_note_ids TEXT,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY (report_sha256, batch_index)
+            );
+        """)
+        uncertain = conn.execute(
+            "SELECT 1 FROM inventory_live_batches WHERE state IN ('sending', 'unknown') LIMIT 1"
+        ).fetchone()
+        if uncertain:
+            raise WorkerError("reconciliation_required", "A previous stock correction has an uncertain outcome. Reconcile it in Brightpearl before any more writes.")
+        run = conn.execute(
+            "SELECT preview_job_id, validation_job_id, total_batches, state FROM inventory_live_runs WHERE report_sha256 = ?",
+            (report_hash,),
+        ).fetchone()
+        if run and (run[0] != preview_id or run[1] != validation_id):
+            raise WorkerError("already_run", "This exact dry-run payload has already been started under another validation; it cannot be submitted again.")
+        if run and run[3] == "complete":
+            raise WorkerError("already_run", "This dry-run payload has already been sent to Brightpearl.")
+        other_open = conn.execute(
+            "SELECT 1 FROM inventory_live_runs WHERE report_sha256 != ? AND state != 'complete' LIMIT 1",
+            (report_hash,),
+        ).fetchone()
+        if other_open:
+            raise WorkerError("resume_required", "Finish or reconcile the previous live run for this account before starting another.")
+        if not run:
+            if file_sha256(report_path) != report_hash:
+                raise WorkerError("report_changed", "The dry-run report changed; build a new dry run before live corrections.")
+            with report_path.open("r", encoding="utf-8") as report:
+                total_batches = sum(1 for _ in report)
+            if total_batches < 1:
+                raise WorkerError("report_empty", "The dry-run report has no batches.")
+        else:
+            total_batches = run[2]
+        batch_index = conn.execute(
+            "SELECT COUNT(*) FROM inventory_live_batches WHERE report_sha256 = ? AND state = 'succeeded'",
+            (report_hash,),
+        ).fetchone()[0]
+        if batch_index >= total_batches:
+            conn.execute("UPDATE inventory_live_runs SET state = 'complete' WHERE report_sha256 = ?", (report_hash,))
+            return {"done": True, "completedBatches": total_batches, "totalBatches": total_batches, "waitMs": 0}
+        with report_path.open("r", encoding="utf-8") as report:
+            for _ in range(batch_index):
+                next(report)
+            expected = json.loads(next(report))
+        first = conn.execute(
+            f"SELECT warehouseId FROM validated_inventory WHERE {unprocessed_where_clause()} "
+            "ORDER BY CAST(warehouseId AS INTEGER), id LIMIT 1"
+        ).fetchone()
+        if not first:
+            raise WorkerError("staged_rows_changed", "Unprocessed staged rows no longer match the dry run.")
+        warehouse_id = int(first[0])
+        rows = conn.execute(
+            "SELECT id, productId, quantity, locationId, costprice FROM validated_inventory "
+            f"WHERE {unprocessed_where_clause()} AND CAST(warehouseId AS INTEGER) = ? ORDER BY id LIMIT ?",
+            (warehouse_id, batch_size),
+        ).fetchall()
+        row_ids = [row["id"] for row in rows]
+        corrections = []
+        for row in rows:
+            quantity = float(row["quantity"])
+            if not math.isfinite(quantity) or not quantity.is_integer():
+                raise WorkerError("fractional_quantity", "Brightpearl stock corrections require whole-number quantities.")
+            corrections.append({
+                "productId": int(row["productId"]), "quantity": int(quantity),
+                "locationId": int(row["locationId"]),
+                "cost": {"currency": currency, "value": float(row["costprice"])},
+                "reason": "Stock Sync",
+            })
+        payload = {"accountName": account_name, "warehouseId": str(warehouse_id), "corrections": corrections}
+        if payload != expected:
+            raise WorkerError("staged_rows_changed", "Staged rows no longer match the reviewed dry-run payload; no write was sent.")
+        payload_hash = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+        if not run:
+            conn.execute(
+                "INSERT INTO inventory_live_runs VALUES (?, ?, ?, ?, 'running')",
+                (report_hash, preview_id, validation_id, total_batches),
+            )
+        conn.execute(
+            "INSERT INTO inventory_live_batches VALUES (?, ?, ?, ?, ?, 'sending', NULL, ?)",
+            (report_hash, batch_index, warehouse_id, json.dumps(row_ids), payload_hash, time.time()),
+        )
+
+    update_job(store, request_id, kind="inventory_live_batch", state="running", dataset_id=account_name,
+               message=f"Sending batch {batch_index + 1} of {total_batches} to warehouse {warehouse_id}.")
+    url = (f"https://{credentials.region}.brightpearlconnect.com/public-api/{account_name}"
+           f"/warehouse-service/warehouse/{warehouse_id}/stock-correction")
+    try:
+        response = requests.post(url, json={"corrections": corrections}, headers=credentials.headers, timeout=(10, 60))
+        if response.status_code != 200:
+            raise WorkerError("write_uncertain", f"Batch {batch_index + 1}/{total_batches}, warehouse {warehouse_id}: Brightpearl returned HTTP {response.status_code}; reconcile before continuing. No automatic retry was made.")
+        body = response.json()
+        note_ids = body.get("response") if isinstance(body, dict) else None
+        if not isinstance(note_ids, list) or len(note_ids) != len(corrections) or any(type(note_id) is not int for note_id in note_ids):
+            raise WorkerError("write_uncertain", f"Batch {batch_index + 1}/{total_batches}, warehouse {warehouse_id}: Brightpearl returned unexpected note IDs; reconcile before continuing.")
+    except (requests.RequestException, ValueError) as exc:
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("UPDATE inventory_live_batches SET state = 'unknown', updated_at = ? WHERE report_sha256 = ? AND batch_index = ?",
+                         (time.time(), report_hash, batch_index))
+        raise WorkerError("write_uncertain", f"Batch {batch_index + 1}/{total_batches}, warehouse {warehouse_id}: outcome unknown; reconcile in Brightpearl before continuing. No automatic retry was made.") from exc
+    except WorkerError:
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("UPDATE inventory_live_batches SET state = 'unknown', updated_at = ? WHERE report_sha256 = ? AND batch_index = ?",
+                         (time.time(), report_hash, batch_index))
+        raise
+
+    with sqlite3.connect(db_path) as conn:
+        marked = mark_rows_processed(conn, "validated_inventory", row_ids,
+                                     f"Brightpearl stock correction notes {','.join(map(str, note_ids))}")
+        if marked != len(row_ids):
+            raise WorkerError("reconciliation_required", "Brightpearl accepted the batch but local processing could not be confirmed. Reconcile before continuing.")
+        conn.execute(
+            "UPDATE inventory_live_batches SET state = 'succeeded', goods_note_ids = ?, updated_at = ? "
+            "WHERE report_sha256 = ? AND batch_index = ?",
+            (json.dumps(note_ids), time.time(), report_hash, batch_index),
+        )
+        done = batch_index + 1 == total_batches
+        if done:
+            conn.execute("UPDATE inventory_live_runs SET state = 'complete' WHERE report_sha256 = ?", (report_hash,))
+    remaining = parse_int_header(response.headers, "brightpearl-requests-remaining", 0)
+    throttle_ms = parse_int_header(response.headers, "brightpearl-next-throttle-period", 0)
+    wait_ms, _ = throttle_decision(remaining, throttle_ms)
+    update_job(store, request_id, kind="inventory_live_batch", state="succeeded", dataset_id=account_name,
+               message=f"Batch {batch_index + 1}/{total_batches} confirmed; {len(row_ids)} rows processed.")
+    return {"done": done, "completedBatches": batch_index + 1, "totalBatches": total_batches,
+            "corrections": len(row_ids), "warehouseId": warehouse_id, "goodsNoteIds": note_ids,
+            "waitMs": max(500, wait_ms) if not done else 0}
+
+
+def inventory_live_status(store: Store, params: dict[str, Any]) -> dict[str, Any]:
+    account_name = normalize_account_name(params.get("accountName"))
+    db_path = account_data_db(store, account_name)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT b.batch_index, b.warehouse_id, b.state, b.row_ids, b.goods_note_ids, b.updated_at "
+                "FROM inventory_live_batches b ORDER BY b.updated_at DESC LIMIT 100"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+    return {"batches": [{
+        "batchIndex": row["batch_index"] + 1,
+        "warehouseId": row["warehouse_id"],
+        "state": row["state"],
+        "rowCount": len(json.loads(row["row_ids"])),
+        "goodsNoteIds": json.loads(row["goods_note_ids"]) if row["goods_note_ids"] else [],
+        "updatedAt": row["updated_at"],
+    } for row in rows]}
+
+
+def inventory_run_resume(store: Store, params: dict[str, Any]) -> dict[str, Any]:
+    account_name = normalize_account_name(params.get("accountName"))
+    db_path = account_data_db(store, account_name)
+    with sqlite3.connect(db_path) as conn:
+        try:
+            run = conn.execute(
+                "SELECT report_sha256, preview_job_id, validation_job_id, total_batches "
+                "FROM inventory_live_runs WHERE state = 'running' ORDER BY rowid DESC LIMIT 1"
+            ).fetchone()
+            completed = conn.execute(
+                "SELECT COUNT(*) FROM inventory_live_batches WHERE report_sha256 = ? AND state = 'succeeded'",
+                (run[0],),
+            ).fetchone()[0] if run else 0
+        except sqlite3.OperationalError:
+            run = None
+            completed = 0
+    if not run:
+        return {"preview": None}
+    with sqlite3.connect(store.ledger) as conn:
+        job = conn.execute(
+            "SELECT source_path FROM jobs WHERE id = ? AND kind = 'inventory_run_preview' AND dataset_id = ?",
+            (run[1], account_name),
+        ).fetchone()
+    if not job or not job[0] or not Path(job[0]).is_file():
+        raise WorkerError("report_missing", "The interrupted live run's dry-run report is missing; reconcile before continuing.")
+    report_path = Path(job[0])
+    first_payload = None
+    correction_count = 0
+    warehouse_ids: set[str] = set()
+    with report_path.open("r", encoding="utf-8") as report:
+        for line in report:
+            payload = json.loads(line)
+            first_payload = first_payload or payload
+            correction_count += len(payload["corrections"])
+            warehouse_ids.add(str(payload["warehouseId"]))
+    currency = account_summary_without_secret(store, account_name).get("baseCurrency")
+    return {"preview": {
+        "accountName": account_name, "previewJobId": run[1], "validationJobId": run[2],
+        "reportSha256": run[0], "reportPath": str(report_path), "reportFileName": report_path.name,
+        "corrections": correction_count, "batches": run[3], "warehouses": len(warehouse_ids),
+        "currency": currency, "samplePayload": {
+            **first_payload, "corrections": first_payload["corrections"][:10]
+        } if first_payload else None,
+    }, "completedBatches": completed}
 
 
 def inventory_price_lists(store: Store, params: dict[str, Any]) -> dict[str, Any]:
@@ -1054,6 +1322,12 @@ def handle(store: Store, request: dict[str, Any]) -> None:
             succeed(request_id, preview_inventory_run(store, request_id, params))
         elif method == "saveInventoryRunPreview":
             succeed(request_id, save_inventory_run_preview(store, params))
+        elif method == "runInventoryBatch":
+            succeed(request_id, run_inventory_batch(store, request_id, params))
+        elif method == "inventoryLiveStatus":
+            succeed(request_id, inventory_live_status(store, params))
+        elif method == "inventoryRunResume":
+            succeed(request_id, inventory_run_resume(store, params))
         elif method == "saveInventoryExceptionReport":
             succeed(request_id, save_inventory_exception_report(store, params))
         elif method == "jobHistory":
