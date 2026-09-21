@@ -162,6 +162,11 @@ Progress-listener correction build on 2026-09-21:
   `30AB89027652897B9C1CB21E2601A6EE22D5BEA9B538A195E7B821FE8D83B2BF`.
 - Frontend production build and Rust tests passed. The worker payload field is
   `event`; 0.1.2 incorrectly checked `name`, leaving visible progress at zero.
+- In 0.1.4, blocking worker pipe I/O runs on Tauri's blocking task pool instead
+  of the window thread, allowing Windows to repaint the app and deliver progress
+  events throughout long reference syncs.
+- NSIS 0.1.4 installer: 237,490,195 bytes; SHA-256
+  `FB320063031779B0D861B80F639E08C27353A39865D0920D928D4EB77391B806`.
 
 The 20k/200k/2M dataset performance gate still needs measured hardware results
 before the prototype can be treated as accepted.

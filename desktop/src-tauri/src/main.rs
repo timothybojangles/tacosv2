@@ -3,7 +3,7 @@ use tauri::Emitter;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 const PROTOCOL_VERSION: i64 = 1;
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
@@ -15,7 +15,7 @@ struct WorkerProcess {
 }
 
 struct EngineState {
-    worker: Mutex<Option<WorkerProcess>>,
+    worker: Arc<Mutex<Option<WorkerProcess>>>,
 }
 
 fn worker_script() -> Result<PathBuf, String> {
@@ -127,8 +127,23 @@ fn validate_request(request: &Value) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn engine_request(app: tauri::AppHandle, state: tauri::State<EngineState>, request: Value) -> Result<Value, String> {
+async fn engine_request(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, EngineState>,
+    request: Value,
+) -> Result<Value, String> {
     validate_request(&request)?;
+    let worker_state = Arc::clone(&state.worker);
+    tauri::async_runtime::spawn_blocking(move || engine_request_blocking(app, worker_state, request))
+        .await
+        .map_err(|err| format!("Engine task failed: {err}"))?
+}
+
+fn engine_request_blocking(
+    app: tauri::AppHandle,
+    worker_state: Arc<Mutex<Option<WorkerProcess>>>,
+    request: Value,
+) -> Result<Value, String> {
     let encoded = serde_json::to_string(&request).map_err(|err| err.to_string())?;
     if encoded.as_bytes().len() > MAX_MESSAGE_BYTES {
         return Err("Engine request exceeded the pipe message limit.".to_string());
@@ -139,7 +154,7 @@ fn engine_request(app: tauri::AppHandle, state: tauri::State<EngineState>, reque
         .ok_or("Engine request id is required")?
         .to_string();
 
-    let mut guard = state.worker.lock().map_err(|_| "Engine state is poisoned")?;
+    let mut guard = worker_state.lock().map_err(|_| "Engine state is poisoned")?;
     if guard.is_none() {
         *guard = Some(start_worker()?);
     }
@@ -178,7 +193,7 @@ fn engine_request(app: tauri::AppHandle, state: tauri::State<EngineState>, reque
 fn main() {
     tauri::Builder::default()
         .manage(EngineState {
-            worker: Mutex::new(None),
+            worker: Arc::new(Mutex::new(None)),
         })
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![engine_request])
