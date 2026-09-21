@@ -118,6 +118,35 @@ def test_account_credentials_are_saved_without_mixing_data_dbs(tmp_path, monkeyp
         raise AssertionError("Different accounts should receive different data DB paths")
 
 
+def test_remove_account_disconnects_credentials_and_preserves_local_data(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("TACOS_CREDENTIAL_BACKEND", "sqlite_plaintext")
+    monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))
+    store = app_store()
+    for account in ("remove-me", "keep-me"):
+        handle(store, _request("saveAccount", {
+            "accountName": account, "appRef": "app", "token": "secret", "region": "euw1"
+        }, f"save-{account}"))
+        capsys.readouterr()
+    removed_db = worker.account_data_db(store, "remove-me")
+
+    handle(store, _request("removeAccount", {
+        "accountName": "remove-me", "confirmAccountName": "wrong"
+    }, "remove-wrong"))
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])["error"]["code"] == "confirmation_required"
+
+    handle(store, _request("removeAccount", {
+        "accountName": "remove-me", "confirmAccountName": "remove-me"
+    }, "remove-confirmed"))
+    result = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
+    assert result == {"removed": "remove-me", "dataPreserved": True}
+    assert removed_db.is_file()
+    assert worker.read_credential("remove-me") is None
+    assert worker.read_credential("keep-me") is not None
+    handle(store, _request("listAccounts", request_id="accounts-after-remove"))
+    accounts = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]["accounts"]
+    assert [account["accountName"] for account in accounts] == ["keep-me"]
+
+
 def test_validate_account_uses_configuration_check_and_saves_base_currency(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("TACOS_CREDENTIAL_BACKEND", "sqlite_plaintext")
     monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))

@@ -333,6 +333,18 @@ def read_credential(account_name: str) -> Credentials | None:
         ctypes.windll.advapi32.CredFree(pointer)
 
 
+def delete_credential(store: Store, account_name: str) -> None:
+    account = normalize_account_name(account_name)
+    if os.environ.get("TACOS_CREDENTIAL_BACKEND") == "sqlite_plaintext":
+        with sqlite3.connect(store.ledger) as conn:
+            conn.execute("DELETE FROM dev_credentials WHERE account_name = ?", (account,))
+        return
+    if not ctypes.windll.advapi32.CredDeleteW(credential_target(account), 1, 0):
+        error = ctypes.windll.kernel32.GetLastError()
+        if error != 1168:  # ERROR_NOT_FOUND means it is already disconnected.
+            raise WorkerError("credential_delete_failed", "Could not remove credentials from Windows Credential Manager.")
+
+
 def account_summary_without_secret(store: Store, account_name: str) -> dict[str, Any]:
     with sqlite3.connect(store.ledger) as conn:
         row = conn.execute(
@@ -395,6 +407,24 @@ def save_account(store: Store, params: dict[str, Any]) -> dict[str, Any]:
     save_credential(account_name, app_ref, token)
     prepare_legacy_credentials(store, account_name, Credentials(app_ref, token, region), None)
     return {"account": account_summary(store, account_name)}
+
+
+def remove_account(store: Store, params: dict[str, Any]) -> dict[str, Any]:
+    account_name = normalize_account_name(params.get("accountName"))
+    if params.get("confirmAccountName") != account_name:
+        raise WorkerError("confirmation_required", "Type the selected account name to disconnect it.")
+    with sqlite3.connect(store.ledger) as conn:
+        if not conn.execute("SELECT 1 FROM accounts WHERE account_name = ?", (account_name,)).fetchone():
+            raise WorkerError("account_missing", "Account is not registered.")
+    ensure_no_open_inventory_run(store, account_name)
+    delete_credential(store, account_name)
+    compatibility_db = store.root / "db" / "credentials.db"
+    if compatibility_db.is_file():
+        with sqlite3.connect(compatibility_db) as conn:
+            conn.execute("DELETE FROM credentials WHERE account_name = ?", (account_name,))
+    with sqlite3.connect(store.ledger) as conn:
+        conn.execute("DELETE FROM accounts WHERE account_name = ?", (account_name,))
+    return {"removed": account_name, "dataPreserved": True}
 
 
 def credentials_for_account(store: Store, account_name: str) -> Credentials:
@@ -1319,6 +1349,8 @@ def handle(store: Store, request: dict[str, Any]) -> None:
             succeed(request_id, list_accounts(store))
         elif method == "saveAccount":
             succeed(request_id, save_account(store, params))
+        elif method == "removeAccount":
+            succeed(request_id, remove_account(store, params))
         elif method == "validateAccount":
             succeed(request_id, validate_account(store, params))
         elif method == "syncInventoryReferences":

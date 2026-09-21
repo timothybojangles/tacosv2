@@ -27,6 +27,22 @@ Every family below belongs in the parity checklist. Inclusion does not mean ever
 | Training helper | ic_training_helper | Preserve demo/reference/order/payment/stock helpers with clear account and action previews |
 | CSV/XLSX and update tooling | csv_safety, launcher, bundle builder, spec | Replace readers and distribution architecture; retain compatible exports where useful |
 
+## Current desktop parity status
+
+The desktop application is an incremental replacement, not yet a whole-legacy
+replacement. Missing families in the table above remain migration work and must
+not be treated as intentionally removed functionality.
+
+| Area | Desktop status | Remaining parity work |
+|---|---|---|
+| Accounts | Multiple account selector, OS credential storage, credential check, account-bound databases, safe disconnect with local data preservation | Account rename and explicit local-data purge policy |
+| Inventory references | Products, warehouses, locations and price lists; complete product snapshot gate, retry/backoff, visible/persisted progress | User cancellation, per-reference retry controls, freshness/last-success display |
+| Inventory source | Native CSV/XLSX picker, import-file or price-list cost, blank/zero policy | Downloadable source template and in-app column mapping |
+| Inventory validation | Product/stock-tracked/location/warehouse/numeric validation, all row errors, previews and complete exception report | Editable correction workflow before revalidation |
+| Inventory execution | Reviewed dry run, payload hash, typed account confirmation, throttled live batches, restart/resume and uncertain-outcome lock | Guided reconciliation action for uncertain batches |
+| Logs/history | Local job history and persisted sync progress | Searchable detailed log viewer, export and retention controls |
+| Other legacy modules | Not yet ported | Contacts, products, orders, purchases, locations/zones, exports, maintenance, API tools, training helpers and the remaining families above |
+
 `update.py` is not an application updater: it contains contact catalogue code with unresolved names and inconsistent table/variable references. Determine whether anything still calls it before retiring it. Do not carry it into the new updater by filename association.
 
 
@@ -37,7 +53,7 @@ Every family below belongs in the parity checklist. Inclusion does not mean ever
 | INV-001 | Numeric location lookup bypasses existence and warehouse | Reject unknown and other-warehouse IDs | two strict expected failures |
 | INV-002 | Numeric quantity/cost not validated | Reject malformed numeric data before staging | two strict expected failures |
 | SO-001 | Confirmed order re-created when retrying failed payment | Resume only incomplete payment | one strict expected failure |
-| REF-001 | Incomplete refresh can replace complete references | Preserve previous complete snapshot | one strict expected failure |
+| REF-001 | Incomplete refresh could replace complete references | Preserve previous complete snapshot | passing regression test |
 | UPD-001 | Dropbox whole-EXE launcher and incomplete changed-file ZIP path | Offline authenticated component update; deletions, base-version checks, rollback | phase-1 Windows package test |
 
 Endpoint request/response fixtures must be verified against current official Brightpearl documentation and the test account during each port. Existing behaviour is evidence of scope, not an oracle for correctness.

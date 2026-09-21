@@ -40,6 +40,8 @@ PyInstaller before building the Tauri app. Generated files under
 - Python worker with SQLite job ledger and DuckDB dataset files under local app
   storage.
 - Account selector with account-bound local data stores.
+- Account disconnect removes the saved credential and selector entry while
+  preserving that account's local database and reports for safe reconnection.
 - Brightpearl account registration with region, app ref and account token.
 - Windows builds store credentials through Windows Credential Manager; tests use
   an isolated plaintext backend only when explicitly configured.
@@ -167,6 +169,18 @@ Progress-listener correction build on 2026-09-21:
   events throughout long reference syncs.
 - NSIS 0.1.4 installer: 237,490,195 bytes; SHA-256
   `FB320063031779B0D861B80F639E08C27353A39865D0920D928D4EB77391B806`.
+
+Direct progress-channel and account-disconnect build on 2026-09-21:
+
+- Full Python suites: 66 passed, 1 strict xfailed (SO-001 only).
+- Frontend production build and Rust tests passed (2 Rust tests).
+- Packaged worker CSV smoke test passed.
+- Long-running reference sync updates use a dedicated direct Tauri event channel.
+- Account disconnect removes credentials and the selector entry while preserving
+  local account data and reports.
+- NSIS 0.1.5 installer: 237,487,362 bytes; SHA-256
+  `C179D4021FDE2408429E3114B3F27DDAE9C6A880FC6A0CFF20A586108AFB9E3C`.
+- Authenticode status: unsigned, as expected without an IT-supplied signing certificate.
 
 The 20k/200k/2M dataset performance gate still needs measured hardware results
 before the prototype can be treated as accepted.

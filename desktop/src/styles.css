@@ -375,6 +375,10 @@ select {
   color: white;
 }
 
+.toolbar .dangerButton {
+  background: #9f2d2d;
+}
+
 button:disabled {
   cursor: not-allowed;
   opacity: 0.55;

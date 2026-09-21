@@ -15,6 +15,7 @@ import {
   Lock,
   RefreshCw,
   Settings,
+  Trash2,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -133,9 +134,8 @@ export default function App() {
 
   useEffect(() => {
     void refreshAccounts();
-    const unlisten = listen<any>("engine-event", ({ payload }) => {
-      const data = payload?.data;
-      if (payload?.event !== "progress" || data?.operation !== "reference_sync") return;
+    const unlisten = listen<any>("reference-sync-progress", ({ payload: data }) => {
+      if (data?.operation !== "reference_sync") return;
       setSyncProgress((current) => ({
         percent: typeof data.percent === "number" ? data.percent : current?.percent || 0,
         completed: data.completed ?? current?.completed,
@@ -215,6 +215,22 @@ export default function App() {
       const result = await engine("validateAccount", { accountName: activeAccountName });
       await refreshAccounts(result.account.accountName);
       setMessage(`Credentials verified. Base currency: ${result.baseCurrency || "not returned"}.`);
+    });
+  }
+
+  async function removeAccount() {
+    if (!activeAccountName) return;
+    const accountName = activeAccountName;
+    const confirmation = window.prompt(
+      `Type ${accountName} to disconnect it. Local account data and reports will be preserved.`,
+    );
+    if (confirmation === null) return;
+    await run("removeAccount", async () => {
+      await engine("removeAccount", { accountName, confirmAccountName: confirmation });
+      setActiveAccountName("");
+      setForm({ accountName: "", appRef: "", token: "", region: "euw1" });
+      await refreshAccounts();
+      setMessage(`${accountName} disconnected. Its local data was preserved.`);
     });
   }
 
@@ -438,6 +454,10 @@ export default function App() {
                 <button onClick={validateAccount} disabled={!!busy || !activeAccountName}>
                   {busy === "validateAccount" ? <Loader2 className="spin" size={18} /> : <CheckCircle2 size={18} />}
                   Check credentials
+                </button>
+                <button className="dangerButton" onClick={removeAccount} disabled={!!busy || !activeAccountName}>
+                  {busy === "removeAccount" ? <Loader2 className="spin" size={18} /> : <Trash2 size={18} />}
+                  Disconnect account
                 </button>
               </div>
             </div>

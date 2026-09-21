@@ -109,6 +109,7 @@ fn validate_request(request: &Value) -> Result<(), String> {
         | "previewDataset"
         | "listAccounts"
         | "saveAccount"
+        | "removeAccount"
         | "validateAccount"
         | "syncInventoryReferences"
         | "inventoryPriceLists"
@@ -124,6 +125,19 @@ fn validate_request(request: &Value) -> Result<(), String> {
         | "shutdown" => Ok(()),
         _ => Err("Engine method is not allowed.".to_string()),
     }
+}
+
+fn event_to_emit(value: &Value) -> Option<(&'static str, Value)> {
+    if value.get("type").and_then(Value::as_str) != Some("event") {
+        return None;
+    }
+    let data = value.get("data").cloned().unwrap_or(Value::Null);
+    let channel = if data.get("operation").and_then(Value::as_str) == Some("reference_sync") {
+        "reference-sync-progress"
+    } else {
+        "engine-event"
+    };
+    Some((channel, if channel == "engine-event" { value.clone() } else { data }))
 }
 
 #[tauri::command]
@@ -176,8 +190,8 @@ fn engine_request_blocking(
             return Err("Worker response exceeded the pipe message limit.".to_string());
         }
         let value: Value = serde_json::from_str(&line).map_err(|err| err.to_string())?;
-        if value.get("type").and_then(Value::as_str) == Some("event") {
-            app.emit("engine-event", value.clone()).map_err(|err| err.to_string())?;
+        if let Some((channel, payload)) = event_to_emit(&value) {
+            app.emit(channel, payload).map_err(|err| err.to_string())?;
             continue;
         }
         if value.get("id").and_then(Value::as_str) == Some(&request_id) {
@@ -235,5 +249,18 @@ mod tests {
             });
             assert!(validate_request(&request).is_ok());
         }
+    }
+
+    #[test]
+    fn routes_reference_progress_as_direct_payload() {
+        let event = json!({
+            "type": "event",
+            "event": "progress",
+            "data": {"operation": "reference_sync", "percent": 57, "completed": 137000}
+        });
+        let (channel, payload) = event_to_emit(&event).expect("event should be routed");
+        assert_eq!(channel, "reference-sync-progress");
+        assert_eq!(payload["percent"], 57);
+        assert_eq!(payload["completed"], 137000);
     }
 }
