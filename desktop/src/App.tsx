@@ -135,7 +135,7 @@ export default function App() {
     void refreshAccounts();
     const unlisten = listen<any>("engine-event", ({ payload }) => {
       const data = payload?.data;
-      if (payload?.name !== "progress" || data?.operation !== "reference_sync") return;
+      if (payload?.event !== "progress" || data?.operation !== "reference_sync") return;
       setSyncProgress((current) => ({
         percent: typeof data.percent === "number" ? data.percent : current?.percent || 0,
         completed: data.completed ?? current?.completed,

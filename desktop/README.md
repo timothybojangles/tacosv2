@@ -156,5 +156,12 @@ Reference-sync completeness build verification on 2026-09-21:
   `4D79040F30ED8130565E10039CEB1B2338AFEE4B09C715C6B464DC319ECAACC6`.
 - Authenticode status: unsigned, as expected without an IT-supplied signing certificate.
 
+Progress-listener correction build on 2026-09-21:
+
+- NSIS 0.1.3 installer: 237,468,901 bytes; SHA-256
+  `30AB89027652897B9C1CB21E2601A6EE22D5BEA9B538A195E7B821FE8D83B2BF`.
+- Frontend production build and Rust tests passed. The worker payload field is
+  `event`; 0.1.2 incorrectly checked `name`, leaving visible progress at zero.
+
 The 20k/200k/2M dataset performance gate still needs measured hardware results
 before the prototype can be treated as accepted.
