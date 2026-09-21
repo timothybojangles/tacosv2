@@ -438,10 +438,19 @@ def sync_inventory_references(store: Store, request_id: str, params: dict[str, A
     logs: list[str] = []
 
     def worker_log(message: str) -> None:
-        logs.append(str(message))
+        message = str(message)
+        logs.append(message)
         if len(logs) > 100:
             del logs[: len(logs) - 100]
-        emit_event(request_id, "progress", {"message": str(message)})
+        event: dict[str, Any] = {"operation": "reference_sync", "message": message}
+        progress = re.fullmatch(r"PROGRESS:(\d{1,3})", message)
+        product_count = re.search(r"Synced (\d+) of (\d+) products", message)
+        if progress:
+            event["percent"] = min(100, int(progress.group(1)))
+        if product_count:
+            event.update({"stage": "products", "completed": int(product_count.group(1)),
+                          "total": int(product_count.group(2))})
+        emit_event(request_id, "progress", event)
 
     with legacy_operation(store):
         product_count = update_product_catalogue(

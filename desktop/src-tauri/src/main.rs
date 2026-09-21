@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+use tauri::Emitter;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -126,7 +127,7 @@ fn validate_request(request: &Value) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn engine_request(state: tauri::State<EngineState>, request: Value) -> Result<Value, String> {
+fn engine_request(app: tauri::AppHandle, state: tauri::State<EngineState>, request: Value) -> Result<Value, String> {
     validate_request(&request)?;
     let encoded = serde_json::to_string(&request).map_err(|err| err.to_string())?;
     if encoded.as_bytes().len() > MAX_MESSAGE_BYTES {
@@ -161,6 +162,7 @@ fn engine_request(state: tauri::State<EngineState>, request: Value) -> Result<Va
         }
         let value: Value = serde_json::from_str(&line).map_err(|err| err.to_string())?;
         if value.get("type").and_then(Value::as_str) == Some("event") {
+            app.emit("engine-event", value.clone()).map_err(|err| err.to_string())?;
             continue;
         }
         if value.get("id").and_then(Value::as_str) == Some(&request_id) {

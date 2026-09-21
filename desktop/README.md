@@ -46,6 +46,16 @@ PyInstaller before building the Tauri app. Generated files under
 - Credential validation through `integration-service/account-configuration`.
 - Inventory reference sync reusing the legacy read-only product, warehouse,
   location and price-list sync helpers with Brightpearl throttle handling.
+- Product reference pages are staged in SQLite and checked against Brightpearl's
+  `resultsAvailable` count before an atomic catalogue replacement. Read failures
+  are retried using the configured backoff; exhausted retries fail the job and
+  preserve the previous complete catalogue. The UI shows product count and
+  percentage progress.
+- Per-account data is stored at
+  `%LOCALAPPDATA%\TACOSv2\accounts\<account>\brightpearl_data.sqlite`; the job
+  ledger is `%LOCALAPPDATA%\TACOSv2\jobs.sqlite`. `reference_sync_progress` and,
+  while a product sync is running or failed, `product_catalogue_sync` are safe
+  read-only inspection points for SQLiteStudio or similar tools.
 - Native source-file selection for CSV/XLSX inventory files.
 - Account-bound consolidated CSV exception reports containing every rejected
   inventory row, while the UI keeps a bounded preview.
@@ -136,6 +146,15 @@ Python 3.12 executable. This is a test build, not a refreshed Python 3.12 lock:
 - NSIS 0.1.1 installer: 237,362,391 bytes; SHA-256
   `19A9B4A4B9EB91690F066F3A5B0DE0B26AE0F478D10043F1D3C33E4554904909`.
 - Sandbox live POST: not yet exercised; all new endpoint tests used mocked HTTP.
+
+Reference-sync completeness build verification on 2026-09-21:
+
+- Full Python suites: 65 passed, 1 strict xfailed (SO-001 only).
+- Frontend build and Cargo tests: passed.
+- Packaged worker CSV smoke test: passed.
+- NSIS 0.1.2 installer: 237,468,739 bytes; SHA-256
+  `4D79040F30ED8130565E10039CEB1B2338AFEE4B09C715C6B464DC319ECAACC6`.
+- Authenticode status: unsigned, as expected without an IT-supplied signing certificate.
 
 The 20k/200k/2M dataset performance gate still needs measured hardware results
 before the prototype can be treated as accepted.

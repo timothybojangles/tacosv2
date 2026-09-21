@@ -18,6 +18,7 @@ from .common import (
     update_base_currency,
 )
 from .performance import record_api_update
+from .settings import get_upload_retry_settings
 
 
 def _flatten_product_rows(rows: Iterable[Iterable]) -> Dict[int, dict]:
@@ -84,59 +85,9 @@ def update_product_catalogue(
             return 0
         log("⚠️ Failed to fetch baseCurrencyCode", log_callback)
 
-    first_result = 1
-    more_pages_available = True
-    all_products = []
-    product_counter = 0
-
-    while more_pages_available:
-        if cancel_token and cancel_token.is_set():
-            log(f"🛑 Cancelled after syncing {product_counter} products (so far).", log_callback)
-            break
-
-        paginated_url = f"{api_url_catalogue}?pageSize=500&firstResult={first_result}"
-        json_response, next_throttle_period, requests_remaining = send_request(
-            paginated_url, credentials.headers, cancel_token=cancel_token, log_callback=log_callback
-        )
-
-        if cancel_token and cancel_token.is_set():
-            log(f"🛑 Cancelled after request (so far: {product_counter}).", log_callback)
-            break
-
-        if json_response:
-            data = json.loads(json_response).get("response", {})
-            results = data.get("results", [])
-            all_products.extend(results)
-            product_counter += len(results)
-            record_api_update(len(results))
-            log(f"📦 Synced {product_counter} products", log_callback)
-
-            metadata = data.get("metaData", {})
-            log_search_progress(metadata, log_callback)
-            more_pages_available = metadata.get("morePagesAvailable", False)
-            last_result = metadata.get("lastResult", first_result + 500)
-            first_result = last_result + 1
-
-            if should_pause_for_throttle(requests_remaining, next_throttle_period):
-                log(f"⏳ Throttling: waiting {next_throttle_period} ms...", log_callback)
-                sleep_with_cancel_ms(next_throttle_period, cancel_token, log_callback)
-        else:
-            more_pages_available = False
-
-    if not all_products:
-        if cancel_token and cancel_token.is_set():
-            return product_counter
-        log("⚠️ No products returned from Brightpearl.", log_callback)
-        return product_counter
-
-    if cancel_token and cancel_token.is_set():
-        return product_counter
-
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS product_catalogue(
+    product_columns = """
             productId INTEGER PRIMARY KEY,
             productName TEXT,
             SKU TEXT,
@@ -155,61 +106,139 @@ def update_product_catalogue(
             productTypeId INTEGER,
             productStatus TEXT,
             primarySupplierId INTEGER
+    """
+    cursor.execute(f"CREATE TABLE IF NOT EXISTS product_catalogue({product_columns})")
+    cursor.execute("DROP TABLE IF EXISTS product_catalogue_sync")
+    cursor.execute(f"CREATE TABLE product_catalogue_sync({product_columns})")
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS reference_sync_progress (
+            reference_name TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            completed INTEGER NOT NULL,
+            total INTEGER,
+            message TEXT,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
-        """
-    )
-    cursor.execute("DELETE FROM product_catalogue")
-
-    product_catalogue = _flatten_product_rows(all_products)
-    for product in product_catalogue.values():
-        if cancel_token and cancel_token.is_set():
-            log("🛑 Cancelled during DB write; partial commit.", log_callback)
-            break
-        cursor.execute(
-            """
-            INSERT INTO product_catalogue (
-                productId,
-                productName,
-                SKU,
-                barcode,
-                EAN,
-                UPC,
-                ISBN,
-                MPN,
-                stockTracked,
-                salesChannelName,
-                createdOn,
-                updatedOn,
-                brightpearlCategoryCode,
-                productGroupId,
-                brandId,
-                productTypeId,
-                productStatus,
-                primarySupplierId
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            """,
-            (
-                product.get("productId"),
-                product.get("productName"),
-                product.get("SKU"),
-                product.get("barcode"),
-                product.get("EAN"),
-                product.get("UPC"),
-                product.get("ISBN"),
-                product.get("MPN"),
-                int(product.get("stockTracked", False)),
-                product.get("salesChannelName"),
-                product.get("createdOn"),
-                product.get("updatedOn"),
-                product.get("brightpearlCategoryCode"),
-                product.get("productGroupId"),
-                product.get("brandId"),
-                product.get("productTypeId"),
-                product.get("productStatus"),
-                product.get("primarySupplierId"),
-            ),
-        )
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_product_catalogue_sku ON product_catalogue(SKU)")
+    """)
+    cursor.execute("""
+        INSERT INTO reference_sync_progress(reference_name, status, completed, total, message, updated_at)
+        VALUES ('products', 'running', 0, NULL, 'Starting product catalogue sync', CURRENT_TIMESTAMP)
+        ON CONFLICT(reference_name) DO UPDATE SET status='running', completed=0, total=NULL,
+            message=excluded.message, updated_at=CURRENT_TIMESTAMP
+    """)
     conn.commit()
-    conn.close()
-    return product_counter
+    insert_sql = """
+        INSERT OR REPLACE INTO product_catalogue_sync (
+            productId, productName, SKU, barcode, EAN, UPC, ISBN, MPN,
+            stockTracked, salesChannelName, createdOn, updatedOn,
+            brightpearlCategoryCode, productGroupId, brandId, productTypeId,
+            productStatus, primarySupplierId
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """
+    first_result = 1
+    product_counter = 0
+    expected_count = None
+    try:
+        while True:
+            if cancel_token and cancel_token.is_set():
+                raise RuntimeError(f"Product catalogue sync cancelled after {product_counter} products.")
+            paginated_url = f"{api_url_catalogue}?pageSize=500&firstResult={first_result}"
+            max_retries, retry_sleep_ms = get_upload_retry_settings()
+            json_response = None
+            next_throttle_period = 0
+            requests_remaining = 0
+            for attempt in range(1, max_retries + 1):
+                json_response, next_throttle_period, requests_remaining = send_request(
+                    paginated_url, credentials.headers, cancel_token=cancel_token, log_callback=log_callback
+                )
+                if json_response:
+                    break
+                if attempt < max_retries:
+                    delay_ms = retry_sleep_ms * attempt
+                    log(
+                        f"Product page at firstResult={first_result} failed; "
+                        f"retrying in {delay_ms} ms ({attempt}/{max_retries}).",
+                        log_callback,
+                    )
+                    sleep_with_cancel_ms(delay_ms, cancel_token, log_callback)
+            if not json_response:
+                raise RuntimeError(
+                    f"Product catalogue request failed at firstResult={first_result}; "
+                    f"the previous complete catalogue was preserved."
+                )
+            try:
+                data = json.loads(json_response)["response"]
+                results = data["results"]
+                metadata = data["metaData"]
+                available = int(metadata["resultsAvailable"])
+                last_result = int(metadata["lastResult"])
+                more_pages_available = bool(metadata["morePagesAvailable"])
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise RuntimeError("Brightpearl returned invalid product-search pagination metadata.") from exc
+            if expected_count is None:
+                expected_count = available
+            elif available != expected_count:
+                raise RuntimeError("Brightpearl product count changed during sync; retry for a consistent snapshot.")
+            if results and last_result < first_result:
+                raise RuntimeError("Brightpearl product-search pagination did not advance.")
+            products = _flatten_product_rows(results)
+            cursor.executemany(insert_sql, [
+                (
+                    product.get("productId"), product.get("productName"), product.get("SKU"),
+                    product.get("barcode"), product.get("EAN"), product.get("UPC"),
+                    product.get("ISBN"), product.get("MPN"), int(product.get("stockTracked", False)),
+                    product.get("salesChannelName"), product.get("createdOn"), product.get("updatedOn"),
+                    product.get("brightpearlCategoryCode"), product.get("productGroupId"),
+                    product.get("brandId"), product.get("productTypeId"),
+                    product.get("productStatus"), product.get("primarySupplierId"),
+                ) for product in products.values()
+            ])
+            product_counter += len(results)
+            cursor.execute("""
+                UPDATE reference_sync_progress
+                SET completed=?, total=?, message=?, updated_at=CURRENT_TIMESTAMP
+                WHERE reference_name='products'
+            """, (product_counter, expected_count, f"Fetched through Brightpearl result {last_result}"))
+            conn.commit()
+            record_api_update(len(results))
+            log(f"📦 Synced {product_counter} of {expected_count} products", log_callback)
+            log_search_progress(metadata, log_callback)
+            if should_pause_for_throttle(requests_remaining, next_throttle_period):
+                log(f"⏳ Throttling: waiting {next_throttle_period} ms...", log_callback)
+                sleep_with_cancel_ms(next_throttle_period, cancel_token, log_callback)
+            if not more_pages_available:
+                break
+            first_result = last_result + 1
+
+        staged_count = cursor.execute("SELECT COUNT(*) FROM product_catalogue_sync").fetchone()[0]
+        if expected_count is None or staged_count != expected_count or product_counter != expected_count:
+            raise RuntimeError(
+                f"Incomplete product catalogue: Brightpearl reported {expected_count}, "
+                f"received {product_counter}, and staged {staged_count} unique products. "
+                "The previous complete catalogue was preserved."
+            )
+        conn.commit()
+        cursor.execute("BEGIN")
+        cursor.execute("DELETE FROM product_catalogue")
+        cursor.execute("INSERT INTO product_catalogue SELECT * FROM product_catalogue_sync")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_product_catalogue_sku ON product_catalogue(SKU)")
+        cursor.execute("DROP TABLE product_catalogue_sync")
+        cursor.execute("""
+            UPDATE reference_sync_progress
+            SET status='succeeded', completed=?, total=?, message='Complete', updated_at=CURRENT_TIMESTAMP
+            WHERE reference_name='products'
+        """, (staged_count, staged_count))
+        conn.commit()
+        log(f"PROGRESS:100", log_callback)
+        return staged_count
+    except Exception as exc:
+        conn.rollback()
+        cursor.execute("""
+            UPDATE reference_sync_progress
+            SET status='failed', completed=?, total=?, message=?, updated_at=CURRENT_TIMESTAMP
+            WHERE reference_name='products'
+        """, (product_counter, expected_count, str(exc)))
+        conn.commit()
+        raise
+    finally:
+        conn.close()

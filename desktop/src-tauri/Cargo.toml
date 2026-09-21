@@ -1,6 +1,6 @@
 [package]
 name = "tacosv2-desktop"
-version = "0.1.1"
+version = "0.1.2"
 description = "TACOS installed desktop prototype"
 edition = "2021"
 

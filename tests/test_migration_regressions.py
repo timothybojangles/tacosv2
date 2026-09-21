@@ -236,12 +236,10 @@ def product_page(product_id, more=False):
     row = [product_id, "Test product", f"TEST-{product_id}", None, None, None,
            None, None, True, None, None, None, None, None, None, None, None, None]
     return json.dumps({"response": {"results": [row], "metaData": {
-        "morePagesAvailable": more, "lastResult": 1
+        "morePagesAvailable": more, "lastResult": 1, "resultsAvailable": 2 if more else 1
     }}}), 10, 0
 
 
-@pytest.mark.legacy_gap
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="REF-001: failed later page replaces complete catalogue")
 def test_failed_reference_refresh_preserves_previous_catalogue(tmp_path):
     db = str(tmp_path / "catalogue.db")
     with (
@@ -251,6 +249,7 @@ def test_failed_reference_refresh_preserves_previous_catalogue(tmp_path):
         patch.object(catalogue, "log_search_progress"),
         patch.object(catalogue, "record_api_update"),
         patch.object(catalogue, "should_pause_for_throttle", return_value=False),
+        patch.object(catalogue, "get_upload_retry_settings", return_value=(1, 0)),
         patch.object(catalogue, "send_request", side_effect=[
             product_page(101), product_page(202, more=True), (None, 0, 0)
         ]),
@@ -258,6 +257,11 @@ def test_failed_reference_refresh_preserves_previous_catalogue(tmp_path):
         catalogue.update_product_catalogue("synthetic", db)
         with sqlite3.connect(db) as conn:
             assert conn.execute("SELECT productId FROM product_catalogue").fetchall() == [(101,)]
-        catalogue.update_product_catalogue("synthetic", db)
+        with pytest.raises(RuntimeError, match="previous complete catalogue was preserved"):
+            catalogue.update_product_catalogue("synthetic", db)
     with sqlite3.connect(db) as conn:
         assert conn.execute("SELECT productId FROM product_catalogue").fetchall() == [(101,)]
+        assert conn.execute(
+            "SELECT status, completed, total FROM reference_sync_progress WHERE reference_name='products'"
+        ).fetchone() == ("failed", 1, 2)
+        assert conn.execute("SELECT productId FROM product_catalogue_sync").fetchall() == [(202,)]

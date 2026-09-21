@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   AlertTriangle,
@@ -116,6 +117,7 @@ export default function App() {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [syncProgress, setSyncProgress] = useState<{ percent: number; completed?: number; total?: number; message?: string } | null>(null);
 
   const activeAccount = accounts.find((account) => account.accountName === activeAccountName) || null;
   const counts = activeAccount?.referenceCounts || emptyCounts();
@@ -131,6 +133,17 @@ export default function App() {
 
   useEffect(() => {
     void refreshAccounts();
+    const unlisten = listen<any>("engine-event", ({ payload }) => {
+      const data = payload?.data;
+      if (payload?.name !== "progress" || data?.operation !== "reference_sync") return;
+      setSyncProgress((current) => ({
+        percent: typeof data.percent === "number" ? data.percent : current?.percent || 0,
+        completed: data.completed ?? current?.completed,
+        total: data.total ?? current?.total,
+        message: data.message || current?.message,
+      }));
+    });
+    return () => { void unlisten.then((stop) => stop()); };
   }, []);
 
   useEffect(() => {
@@ -207,6 +220,7 @@ export default function App() {
 
   async function syncReferences() {
     if (!activeAccountName) return;
+    setSyncProgress({ percent: 0, message: "Starting product catalogue sync..." });
     await run("syncReferences", async () => {
       const result = await engine("syncInventoryReferences", { accountName: activeAccountName });
       setValidation(null);
@@ -217,6 +231,7 @@ export default function App() {
       setMessage(
         `Synced products ${result.results.products}, warehouses ${result.results.warehouses}, locations ${result.results.locations}, price values ${result.results.priceListValues}.`
       );
+      setSyncProgress({ percent: 100, completed: result.results.products, total: result.results.products, message: "Reference sync complete." });
     });
   }
 
@@ -457,6 +472,13 @@ export default function App() {
                 {busy === "syncReferences" ? <Loader2 className="spin" size={18} /> : <RefreshCw size={18} />}
                 Sync required data
               </button>
+              {syncProgress && (
+                <div className="syncProgress" aria-live="polite">
+                  <div className="progressTrack"><span style={{ width: `${syncProgress.percent}%` }} /></div>
+                  <span>{syncProgress.percent}%{syncProgress.total ? ` (${syncProgress.completed?.toLocaleString()} of ${syncProgress.total.toLocaleString()} products)` : ""}</span>
+                  {syncProgress.message && <small>{syncProgress.message}</small>}
+                </div>
+              )}
             </section>
             <section className="step stepSource">
               <div className="stepHeading"><span className="stepIndex">3</span><h2>Source</h2></div>
@@ -613,6 +635,8 @@ export default function App() {
             <div>
               <h2>Storage</h2>
               <p>Each account has its own local data database, bound by account name.</p>
+              {activeAccount && <code>{activeAccount.dataDbPath}</code>}
+              <p>The shared job ledger is <code>%LOCALAPPDATA%\TACOSv2\jobs.sqlite</code>. Open SQLite files read-only while TACOS is running.</p>
             </div>
             <div>
               <h2>Credentials</h2>
@@ -620,7 +644,7 @@ export default function App() {
             </div>
             <div>
               <h2>Safety</h2>
-              <p>Reference sync uses Brightpearl reads; stock-correction writes remain disabled.</p>
+              <p>Reference sync uses Brightpearl reads and only publishes complete snapshots. Live inventory corrections require a reviewed dry run and typed account confirmation.</p>
             </div>
           </section>
         )}
