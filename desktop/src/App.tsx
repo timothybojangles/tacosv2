@@ -97,6 +97,19 @@ function formatTime(value?: number) {
   return value ? new Date(value * 1000).toLocaleString() : "Not yet";
 }
 
+function settingText(settings: AppSettings | null, key: string, fallback: string) {
+  const value = settings?.[key];
+  return typeof value === "string" && value ? value : fallback;
+}
+
+function appearanceClass(settings: AppSettings | null) {
+  const mode = settingText(settings, "appearance_mode", "System").toLowerCase();
+  const theme = settingText(settings, "appearance_theme", "Sage").toLowerCase();
+  const safeMode = ["system", "light", "dark"].includes(mode) ? mode : "system";
+  const safeTheme = theme === "brightpearl" ? "brightpearl" : "sage";
+  return `app appearance-${safeMode} theme-${safeTheme}`;
+}
+
 function emptyCounts(): ReferenceCounts {
   return {
     products: 0,
@@ -418,7 +431,7 @@ export default function App() {
   }
 
   return (
-    <main className="app">
+    <main className={appearanceClass(appSettings)}>
       <aside className="sidebar">
         <div className="brand">
           <span className="brandMark">T</span>

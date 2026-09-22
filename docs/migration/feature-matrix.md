@@ -66,6 +66,7 @@ The new app must preserve the legacy menu families. Do not collapse every tool i
    - Port Add account, Remove active account, Quit, Global Settings, Compact UI mode, About, app logo/theme behavior and progress/log panels.
    - Improve by using OS credential storage, account-bound data paths, clearer destructive-action prompts, searchable job history, readable error guidance and exportable logs.
    - Keep settings from `brightpearl/settings.py`: retry limits, log level, output folders, appearance, resolution and stock correction batch size.
+   - Do not expose inert settings. A setting must either change runtime behavior in the new app, be marked as not ported, or be removed from the visible UI until it is wired.
 
 2. Shared Platform Foundation
    - Build one operation model used by every module: source selection, mapping, validation, preview, run, checkpoint, resume/reconcile and review.

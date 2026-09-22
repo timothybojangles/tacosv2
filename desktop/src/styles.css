@@ -24,8 +24,72 @@ select {
   grid-template-columns: 248px minmax(0, 1fr);
 }
 
+.theme-sage {
+  --accent: #23634d;
+  --accent-strong: #1d523f;
+  --accent-soft: #e7f1ec;
+  --accent-step: #2f80ed;
+}
+
+.theme-brightpearl {
+  --accent: #2357a3;
+  --accent-strong: #1d4380;
+  --accent-soft: #e8f0fb;
+  --accent-step: #2357a3;
+}
+
+.appearance-light,
+.appearance-system {
+  --page-bg: #f6f7f9;
+  --surface: #ffffff;
+  --surface-muted: #f8fafc;
+  --border: #d9e1e8;
+  --text: #1f2933;
+  --muted: #64748b;
+  --field-bg: #ffffff;
+  --sidebar-bg: #1d252d;
+  --sidebar-hover: #34414f;
+  --sidebar-text: #dbe4ed;
+  --pre-bg: #f6f7f9;
+}
+
+.appearance-dark {
+  --page-bg: #111820;
+  --surface: #18222c;
+  --surface-muted: #202c38;
+  --border: #334252;
+  --text: #edf2f7;
+  --muted: #aab7c4;
+  --field-bg: #121b24;
+  --sidebar-bg: #0c1218;
+  --sidebar-hover: #243242;
+  --sidebar-text: #e5edf5;
+  --pre-bg: #0f161d;
+}
+
+@media (prefers-color-scheme: dark) {
+  .appearance-system {
+    --page-bg: #111820;
+    --surface: #18222c;
+    --surface-muted: #202c38;
+    --border: #334252;
+    --text: #edf2f7;
+    --muted: #aab7c4;
+    --field-bg: #121b24;
+    --sidebar-bg: #0c1218;
+    --sidebar-hover: #243242;
+    --sidebar-text: #e5edf5;
+    --pre-bg: #0f161d;
+  }
+}
+
+.app {
+  background: var(--page-bg);
+  color: var(--text);
+}
+
 .sidebar {
-  background: #1d252d;
+  background: var(--sidebar-bg);
   color: #f8fafc;
   padding: 20px 14px;
 }
@@ -43,8 +107,8 @@ select {
   display: grid;
   place-items: center;
   border-radius: 8px;
-  background: #f2c94c;
-  color: #1d252d;
+  background: var(--accent);
+  color: #fff;
   font-weight: 800;
 }
 
@@ -55,6 +119,18 @@ header p,
 .meta,
 .empty {
   color: #64748b;
+}
+
+.app header p,
+.app .step p,
+.app .settingsGrid p,
+.app .meta,
+.app .empty,
+.app dt,
+.app .operationCard dt,
+.app .syncProgress small,
+.app .resultHeader p {
+  color: var(--muted);
 }
 
 .brand span:last-child {
@@ -85,13 +161,13 @@ nav button,
 
 nav button {
   background: transparent;
-  color: #dbe4ed;
+  color: var(--sidebar-text);
   width: 100%;
 }
 
 nav button.active,
 nav button:hover {
-  background: #34414f;
+  background: var(--sidebar-hover);
 }
 
 .workspace {
@@ -108,7 +184,8 @@ nav button:hover {
 .sidebar select {
   width: calc(100% - 16px);
   margin: 0 8px;
-  color: #1f2933;
+  color: var(--text);
+  background: var(--field-bg);
 }
 
 header {
@@ -141,8 +218,8 @@ h2 {
   gap: 8px;
   border-radius: 8px;
   padding: 8px 10px;
-  background: #e7f1ec;
-  color: #23634d;
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .notice {
@@ -200,7 +277,7 @@ h2 {
 .progressTrack span {
   display: block;
   height: 100%;
-  background: #23634d;
+  background: var(--accent);
   transition: width 180ms ease;
 }
 
@@ -254,7 +331,7 @@ h2 {
 }
 
 .accountSnapshot {
-  border-left: 1px solid #d9e1e8;
+  border-left: 1px solid var(--border);
   padding-left: 18px;
 }
 
@@ -273,10 +350,10 @@ h2 {
 }
 
 .operationCard {
-  border: 1px solid #d9e1e8;
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 14px;
-  background: #fff;
+  background: var(--surface);
 }
 
 .operationTitle {
@@ -299,13 +376,13 @@ h2 {
 }
 
 .statusActive {
-  background: #e7f1ec;
-  color: #23634d;
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .statusPending {
-  background: #eef2f6;
-  color: #526273;
+  background: var(--surface-muted);
+  color: var(--muted);
 }
 
 .operationCard dl {
@@ -333,8 +410,8 @@ h2 {
 
 .step,
 .panel {
-  background: #fff;
-  border: 1px solid #d9e1e8;
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 16px;
 }
@@ -371,7 +448,7 @@ h2 {
   display: grid;
   place-items: center;
   border-radius: 999px;
-  background: #2f80ed;
+  background: var(--accent-step);
   color: white;
   font-weight: 700;
   margin: 0;
@@ -408,10 +485,11 @@ label {
 input,
 select {
   min-height: 38px;
-  border: 1px solid #cbd5df;
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 0 10px;
-  background: white;
+  background: var(--field-bg);
+  color: var(--text);
   min-width: 180px;
 }
 
@@ -444,7 +522,7 @@ select {
 
 .sourceRow button,
 .toolbar button {
-  background: #23634d;
+  background: var(--accent);
   color: white;
 }
 
@@ -458,8 +536,8 @@ button:disabled {
 }
 
 .disabledAction {
-  background: #e5e7eb;
-  color: #475569;
+  background: var(--surface-muted);
+  color: var(--muted);
 }
 
 .stepRun button,
@@ -471,13 +549,13 @@ button:disabled {
   border: 0;
   border-radius: 8px;
   padding: 0 12px;
-  background: #23634d;
+  background: var(--accent);
   color: white;
   cursor: pointer;
 }
 
 .runPreview {
-  border-top: 1px solid #d9e1e8;
+  border-top: 1px solid var(--border);
   padding-top: 14px;
   min-width: 0;
 }
@@ -486,8 +564,9 @@ button:disabled {
   max-height: 320px;
   overflow: auto;
   padding: 12px;
-  background: #f6f7f9;
-  border: 1px solid #d9e1e8;
+  background: var(--pre-bg);
+  border: 1px solid var(--border);
+  color: var(--text);
   border-radius: 8px;
   font-size: 12px;
 }
@@ -513,7 +592,7 @@ button:disabled {
 .liveBatchStatus {
   margin: 4px 0 12px;
   padding: 10px 0;
-  border-top: 1px solid #d9e1e8;
+  border-top: 1px solid var(--border);
   font-size: 13px;
   line-height: 1.6;
 }
@@ -522,10 +601,6 @@ dl {
   display: grid;
   grid-template-columns: max-content 1fr;
   gap: 6px 12px;
-}
-
-dt {
-  color: #64748b;
 }
 
 dd {
@@ -540,10 +615,10 @@ dd {
 
 .tableWrap {
   overflow: auto;
-  border: 1px solid #d9e1e8;
+  border: 1px solid var(--border);
   border-radius: 8px;
   min-height: 320px;
-  background: #fff;
+  background: var(--surface);
 }
 
 .resultHeader,
@@ -559,10 +634,7 @@ dd {
   flex-wrap: wrap;
 }
 
-.resultHeader p {
-  color: #64748b;
-  margin-bottom: 0;
-}
+.resultHeader p { margin-bottom: 0; }
 
 .resultCounts span {
   padding: 8px 10px;
@@ -583,8 +655,8 @@ dd {
 }
 
 .acceptedCount {
-  color: #23634d;
-  background: #e7f1ec;
+  color: var(--accent);
+  background: var(--accent-soft);
 }
 
 .rejectedCount {
@@ -593,7 +665,7 @@ dd {
 }
 
 .resultTabs {
-  border-bottom: 1px solid #d9e1e8;
+  border-bottom: 1px solid var(--border);
 }
 
 .resultTabs button {
@@ -601,12 +673,13 @@ dd {
   border-bottom: 3px solid transparent;
   padding: 8px 12px;
   background: transparent;
+  color: var(--text);
   cursor: pointer;
 }
 
 .resultTabs button.active {
-  border-bottom-color: #23634d;
-  color: #23634d;
+  border-bottom-color: var(--accent);
+  color: var(--accent);
   font-weight: 700;
 }
 
@@ -619,7 +692,7 @@ table {
 th,
 td {
   text-align: left;
-  border-bottom: 1px solid #edf1f5;
+  border-bottom: 1px solid var(--border);
   padding: 9px 10px;
   white-space: nowrap;
 }
@@ -627,7 +700,7 @@ td {
 th {
   position: sticky;
   top: 0;
-  background: #f8fafc;
+  background: var(--surface-muted);
 }
 
 .job {
@@ -636,7 +709,7 @@ th {
   gap: 12px;
   align-items: center;
   padding: 10px 0;
-  border-bottom: 1px solid #edf1f5;
+  border-bottom: 1px solid var(--border);
 }
 
 code {
@@ -671,7 +744,7 @@ code {
   border: 0;
   border-radius: 8px;
   padding: 0 12px;
-  background: #23634d;
+  background: var(--accent);
   color: #fff;
   cursor: pointer;
   margin-bottom: 12px;
