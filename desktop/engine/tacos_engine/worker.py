@@ -17,6 +17,7 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +28,7 @@ from brightpearl.common import Credentials, connect_sqlite, ensure_account_bindi
 from brightpearl.throttle import parse_int_header, throttle_decision
 from brightpearl.inventory_import import update_product_catalogue
 from brightpearl.inventory_pricelists import sync_inventory_pricelists
-from brightpearl.settings import get_settings
+from brightpearl.settings import AppSettings, get_settings, normalize_settings, save_settings, settings_path
 from brightpearl.warehouse_locations import update_location_catalogue
 from reference_data import fetch_and_store_reference_tables
 from validator import validate_and_enrich_inventory
@@ -606,6 +607,28 @@ def legacy_operations() -> dict[str, Any]:
         if category not in categories:
             categories.append(category)
     return {"operations": LEGACY_OPERATIONS, "categories": categories}
+
+
+def app_settings_payload() -> dict[str, Any]:
+    return {
+        "settings": asdict(get_settings()),
+        "settingsPath": str((Path.cwd() / settings_path()).resolve()),
+        "options": {
+            "logLevels": ["PAYLOAD", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+            "appearanceModes": ["System", "Light", "Dark"],
+            "appearanceThemes": ["Brightpearl", "Sage"],
+            "stockCorrectionBatchSize": {"min": 1, "max": 500},
+        },
+    }
+
+
+def update_app_settings(params: dict[str, Any]) -> dict[str, Any]:
+    raw = params.get("settings") if isinstance(params.get("settings"), dict) else params
+    current = asdict(get_settings())
+    current.update(raw)
+    updated = normalize_settings(current)
+    save_settings(updated)
+    return {"settings": asdict(updated), "settingsPath": str((Path.cwd() / settings_path()).resolve())}
 
 
 def save_account(store: Store, params: dict[str, Any]) -> dict[str, Any]:
@@ -1580,6 +1603,10 @@ def handle(store: Store, request: dict[str, Any]) -> None:
             succeed(request_id, go_live_operations())
         elif method == "legacyOperations":
             succeed(request_id, legacy_operations())
+        elif method == "appSettings":
+            succeed(request_id, app_settings_payload())
+        elif method == "saveAppSettings":
+            succeed(request_id, update_app_settings(params))
         elif method == "saveAccount":
             succeed(request_id, save_account(store, params))
         elif method == "removeAccount":

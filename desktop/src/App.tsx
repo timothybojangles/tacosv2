@@ -45,6 +45,8 @@ type Account = {
 
 type PreviewRow = Record<string, unknown>;
 
+type AppSettings = Record<string, string | number>;
+
 type LegacyOperation = {
   id: string;
   label: string;
@@ -134,6 +136,8 @@ export default function App() {
   const [syncProgress, setSyncProgress] = useState<{ percent: number; completed?: number; total?: number; message?: string } | null>(null);
   const [legacyOperations, setLegacyOperations] = useState<LegacyOperation[]>([]);
   const [legacyCategories, setLegacyCategories] = useState<string[]>([]);
+  const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
+  const [settingsPath, setSettingsPath] = useState("");
 
   const activeAccount = accounts.find((account) => account.accountName === activeAccountName) || null;
   const counts = activeAccount?.referenceCounts || emptyCounts();
@@ -155,6 +159,7 @@ export default function App() {
         setLegacyCategories(result.categories || []);
       })
       .catch((err) => setError(`Could not load legacy tool registry: ${errorMessage(err)}`));
+    void loadAppSettings();
     const unlisten = listen<any>("reference-sync-progress", ({ payload: data }) => {
       if (data?.operation !== "reference_sync") return;
       setSyncProgress((current) => ({
@@ -390,6 +395,26 @@ export default function App() {
       const result = await engine("jobHistory");
       setJobs(result.jobs);
     });
+  }
+
+  async function loadAppSettings() {
+    const result = await engine("appSettings");
+    setAppSettings(result.settings);
+    setSettingsPath(result.settingsPath || "");
+  }
+
+  async function saveAppSettings() {
+    if (!appSettings) return;
+    await run("saveSettings", async () => {
+      const result = await engine("saveAppSettings", { settings: appSettings });
+      setAppSettings(result.settings);
+      setSettingsPath(result.settingsPath || settingsPath);
+      setMessage("Settings saved.");
+    });
+  }
+
+  function updateSetting(key: string, value: string) {
+    setAppSettings((current) => current ? { ...current, [key]: value } : current);
   }
 
   return (
@@ -723,13 +748,62 @@ export default function App() {
               <p>Each account has its own local data database, bound by account name.</p>
               {activeAccount && <code>{activeAccount.dataDbPath}</code>}
               <p>The shared job ledger is <code>%LOCALAPPDATA%\TACOSv2\jobs.sqlite</code>. Open SQLite files read-only while TACOS is running.</p>
+              {settingsPath && <p>Settings file: <code>{settingsPath}</code></p>}
             </div>
             <div>
-              <h2>Credentials</h2>
-              <p>Windows builds store API credentials outside Git and outside synced folders.</p>
+              <h2>Logging</h2>
+              <label>
+                Log level
+                <select value={String(appSettings?.log_level || "INFO")} onChange={(event) => updateSetting("log_level", event.target.value)}>
+                  {["PAYLOAD", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"].map((level) => <option key={level} value={level}>{level}</option>)}
+                </select>
+              </label>
+              <label>
+                Debug output folder
+                <input value={String(appSettings?.log_output_dir || "")} onChange={(event) => updateSetting("log_output_dir", event.target.value)} />
+              </label>
+              <label>
+                Exception output folder
+                <input value={String(appSettings?.unmatched_output_dir || "")} onChange={(event) => updateSetting("unmatched_output_dir", event.target.value)} />
+              </label>
             </div>
             <div>
-              <h2>Safety</h2>
+              <h2>Brightpearl pacing</h2>
+              <label>
+                Throttle threshold
+                <input type="number" min="1" value={String(appSettings?.throttle_threshold || 2)} onChange={(event) => updateSetting("throttle_threshold", event.target.value)} />
+              </label>
+              <label>
+                Download retries
+                <input type="number" min="1" value={String(appSettings?.download_max_retries || 3)} onChange={(event) => updateSetting("download_max_retries", event.target.value)} />
+              </label>
+              <label>
+                Upload retries
+                <input type="number" min="1" value={String(appSettings?.upload_max_retries || 3)} onChange={(event) => updateSetting("upload_max_retries", event.target.value)} />
+              </label>
+              <label>
+                Stock correction batch size
+                <input type="number" min="1" max="500" value={String(appSettings?.stock_correction_batch_size || 50)} onChange={(event) => updateSetting("stock_correction_batch_size", event.target.value)} />
+              </label>
+            </div>
+            <div>
+              <h2>Interface</h2>
+              <label>
+                Appearance
+                <select value={String(appSettings?.appearance_mode || "System")} onChange={(event) => updateSetting("appearance_mode", event.target.value)}>
+                  {["System", "Light", "Dark"].map((mode) => <option key={mode} value={mode}>{mode}</option>)}
+                </select>
+              </label>
+              <label>
+                Theme
+                <select value={String(appSettings?.appearance_theme || "Sage")} onChange={(event) => updateSetting("appearance_theme", event.target.value)}>
+                  {["Sage", "Brightpearl"].map((theme) => <option key={theme} value={theme}>{theme}</option>)}
+                </select>
+              </label>
+              <button onClick={saveAppSettings} disabled={!!busy || !appSettings}>
+                {busy === "saveSettings" ? <Loader2 className="spin" size={18} /> : <Settings size={18} />}
+                Save settings
+              </button>
               <p>Reference sync uses Brightpearl reads and only publishes complete snapshots. Live inventory corrections require a reviewed dry run and typed account confirmation.</p>
             </div>
           </section>

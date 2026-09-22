@@ -233,6 +233,23 @@ def test_go_live_operations_expose_legacy_scope(tmp_path, monkeypatch, capsys):
     assert result["operations"][1]["legacyModules"] == ["validator_sales_orders.py", "sync_sales_orders.py"]
 
 
+def test_app_settings_roundtrip_uses_legacy_normalization(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))
+    store = app_store()
+    handle(store, _request("saveAppSettings", {
+        "settings": {"log_level": "debug", "stock_correction_batch_size": "501", "upload_max_retries": "7"}
+    }, "save-settings"))
+    saved = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]["settings"]
+    assert saved["log_level"] == "DEBUG"
+    assert saved["stock_correction_batch_size"] == 50
+    assert saved["upload_max_retries"] == 7
+
+    handle(store, _request("appSettings", request_id="settings"))
+    loaded = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
+    assert loaded["settings"]["log_level"] == "DEBUG"
+    assert loaded["options"]["stockCorrectionBatchSize"] == {"min": 1, "max": 500}
+
+
 def test_inventory_reference_sync_reports_persisted_product_progress(tmp_path, monkeypatch, capfd):
     monkeypatch.setenv("TACOS_CREDENTIAL_BACKEND", "sqlite_plaintext")
     monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))

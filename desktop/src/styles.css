@@ -645,7 +645,36 @@ code {
 }
 
 .settingsGrid {
-  grid-template-columns: repeat(3, minmax(200px, 1fr));
+  grid-template-columns: repeat(4, minmax(200px, 1fr));
+  align-items: start;
+}
+
+.settingsGrid label {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 12px;
+  font-weight: 700;
+}
+
+.settingsGrid input,
+.settingsGrid select {
+  min-width: 0;
+  width: 100%;
+  font-weight: 400;
+}
+
+.settingsGrid button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  border: 0;
+  border-radius: 8px;
+  padding: 0 12px;
+  background: #23634d;
+  color: #fff;
+  cursor: pointer;
+  margin-bottom: 12px;
 }
 
 .spin {

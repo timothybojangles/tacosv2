@@ -109,6 +109,8 @@ fn validate_request(request: &Value) -> Result<(), String> {
         | "previewDataset"
         | "goLiveOperations"
         | "legacyOperations"
+        | "appSettings"
+        | "saveAppSettings"
         | "listAccounts"
         | "saveAccount"
         | "removeAccount"
