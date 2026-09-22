@@ -345,6 +345,28 @@ export default function App() {
     });
   }
 
+  async function saveOpenSalesTemplate() {
+    const destination = await save({
+      defaultPath: "bp_sales_import.csv",
+      filters: [{ name: "Spreadsheet files", extensions: ["csv", "xlsx"] }],
+    });
+    if (typeof destination !== "string") return;
+    await run("saveOpenSalesTemplate", async () => {
+      const result = await engine("saveOpenSalesTemplate", { destination });
+      setMessage(`Open Sales template saved to ${result.path}.`);
+    });
+  }
+
+  async function syncOpenSalesReferences(mode: "all" | "reference" | "contacts" | "products") {
+    if (!activeAccountName) return;
+    await run(`syncOpenSales-${mode}`, async () => {
+      const result = await engine("syncOpenSalesReferences", { accountName: activeAccountName, mode });
+      setOpenSalesValidation((current: any) => current ? { ...current, referenceCounts: result.referenceCounts, logs: result.logs } : { referenceCounts: result.referenceCounts, logs: result.logs });
+      await refreshAccounts(activeAccountName);
+      setMessage(`Open Sales ${mode === "all" ? "sync all" : mode} complete.`);
+    });
+  }
+
   async function refreshOpenSalesPreview() {
     if (!activeAccountName) return;
     await run("previewOpenSales", async () => {
@@ -758,10 +780,26 @@ export default function App() {
                 <div className="stepHeading"><span className="stepIndex">1</span><h2>Account</h2></div>
                 <p>{activeAccountName ? `Using ${activeAccountName}.` : "Choose an account first."}</p>
               </section>
+              <section className="step stepRefs">
+                <div className="stepHeading"><span className="stepIndex">2</span><h2>References</h2></div>
+                <div className="toolbar">
+                  <button onClick={() => syncOpenSalesReferences("all")} disabled={!!busy || !activeAccountName}>
+                    {busy === "syncOpenSales-all" ? <Loader2 className="spin" size={18} /> : <RefreshCw size={18} />}
+                    Sync all
+                  </button>
+                  <button onClick={() => syncOpenSalesReferences("reference")} disabled={!!busy || !activeAccountName}>Reference data</button>
+                  <button onClick={() => syncOpenSalesReferences("contacts")} disabled={!!busy || !activeAccountName}>Contact refs</button>
+                  <button onClick={() => syncOpenSalesReferences("products")} disabled={!!busy || !activeAccountName}>Product refs</button>
+                </div>
+              </section>
               <section className="step stepSource">
-                <div className="stepHeading"><span className="stepIndex">2</span><h2>Source</h2></div>
+                <div className="stepHeading"><span className="stepIndex">3</span><h2>Source</h2></div>
                 <div className="sourceRow">
                   <input value={openSalesPath} readOnly placeholder="Choose Open Sales CSV/XLSX" />
+                  <button onClick={saveOpenSalesTemplate} disabled={!!busy}>
+                    <Download size={18} />
+                    Template
+                  </button>
                   <button onClick={chooseOpenSalesSource} disabled={!!busy}>
                     <FolderOpen size={18} />
                     Choose
@@ -769,7 +807,7 @@ export default function App() {
                 </div>
               </section>
               <section className="step stepValidate">
-                <div className="stepHeading"><span className="stepIndex">3</span><h2>Validate</h2></div>
+                <div className="stepHeading"><span className="stepIndex">4</span><h2>Validate</h2></div>
                 <p>Checks customers, products, warehouses, channels, price lists, statuses, currencies, shipping and payments.</p>
                 <button onClick={validateOpenSalesSource} disabled={!!busy || !activeAccountName || !openSalesPath}>
                   {busy === "validateOpenSales" ? <Loader2 className="spin" size={18} /> : <FileSearch size={18} />}
@@ -777,7 +815,7 @@ export default function App() {
                 </button>
               </section>
               <section className="step stepRun">
-                <div className="stepHeading"><span className="stepIndex">4</span><h2>Live posting</h2></div>
+                <div className="stepHeading"><span className="stepIndex">5</span><h2>Sync to Brightpearl</h2></div>
                 <p>{openSalesPreview?.executionStatus?.message || "Live posting will appear only after checkpointed order and payment execution is implemented."}</p>
               </section>
             </div>

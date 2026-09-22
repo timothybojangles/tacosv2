@@ -129,6 +129,8 @@ fn validate_request(request: &Value) -> Result<(), String> {
         | "validateInventoryFile"
         | "validateOpenSalesFile"
         | "previewOpenSalesRun"
+        | "saveOpenSalesTemplate"
+        | "syncOpenSalesReferences"
         | "saveInventoryExceptionReport"
         | "jobHistory"
         | "cancel"

@@ -25,6 +25,7 @@ from typing import Any
 import duckdb
 import requests
 
+from csv_safety import open_table
 from brightpearl.common import (
     DEBUG_LOG,
     PAYLOAD_LOG,
@@ -35,6 +36,7 @@ from brightpearl.common import (
     mark_rows_processed,
     unprocessed_where_clause,
 )
+from brightpearl.additional_addresses import update_contact_catalogue
 from brightpearl.throttle import parse_int_header, throttle_decision
 from brightpearl.inventory_import import update_product_catalogue
 from brightpearl.inventory_pricelists import sync_inventory_pricelists
@@ -45,6 +47,7 @@ from validator import validate_and_enrich_inventory
 from validator_sales_orders import (
     ORDERS_TABLE as SALES_ORDERS_TABLE,
     ROWS_TABLE as SALES_ROWS_TABLE,
+    TEMPLATE_HEADERS as SALES_TEMPLATE_HEADERS,
     validate_sales_orders,
 )
 
@@ -1112,6 +1115,61 @@ def preview_open_sales_run(store: Store, request_id: str, params: dict[str, Any]
     return {"accountName": account_name, **preview, "referenceCounts": sales_reference_counts(db_path)}
 
 
+def save_open_sales_template(store: Store, params: dict[str, Any]) -> dict[str, Any]:
+    destination = Path(str(params.get("destination", ""))).expanduser().resolve()
+    if destination.suffix.lower() not in {".csv", ".xlsx"} or not destination.parent.is_dir():
+        raise WorkerError("invalid_destination", "Choose a CSV or XLSX destination in an existing folder.")
+    with legacy_cwd(store):
+        with open_table(str(destination), mode="w", newline="") as file:
+            writer = csv.writer(file)
+            writer.writerow(SALES_TEMPLATE_HEADERS)
+    return {"path": str(destination), "headers": SALES_TEMPLATE_HEADERS}
+
+
+def sync_open_sales_references(store: Store, request_id: str, params: dict[str, Any]) -> dict[str, Any]:
+    account_name = normalize_account_name(params.get("accountName"))
+    mode = str(params.get("mode") or "all").strip()
+    if mode not in {"all", "reference", "contacts", "products"}:
+        raise WorkerError("invalid_options", "Choose all, reference, contacts or products for Open Sales sync.")
+    credentials = credentials_for_account(store, account_name)
+    db_path = account_data_db(store, account_name)
+    prepare_legacy_credentials(store, account_name, credentials, account_summary_without_secret(store, account_name).get("baseCurrency"))
+    update_job(store, request_id, kind="open_sales_reference_sync", state="running", source_path=mode, dataset_id=account_name)
+    logs: list[str] = []
+
+    def worker_log(message: str) -> None:
+        text = str(message)
+        logs.append(text)
+        if len(logs) > 100:
+            del logs[: len(logs) - 100]
+        if text.startswith("PROGRESS:"):
+            emit_event(request_id, "progress", {"operation": "open_sales_reference_sync", "message": text})
+
+    results: dict[str, Any] = {}
+    with legacy_operation(store):
+        if mode in {"all", "reference"}:
+            results["reference"] = fetch_and_store_reference_tables(
+                account_name,
+                credentials.region,
+                credentials.headers,
+                str(db_path),
+                log_callback=worker_log,
+            )
+        if mode in {"all", "contacts"}:
+            results["contacts"] = update_contact_catalogue(account_name, str(db_path), log_callback=worker_log)
+        if mode in {"all", "products"}:
+            results["products"] = update_product_catalogue(account_name, str(db_path), log_callback=worker_log)
+
+    update_job(
+        store,
+        request_id,
+        kind="open_sales_reference_sync",
+        state="succeeded",
+        message="Open Sales reference sync complete.",
+    )
+    return {"accountName": account_name, "mode": mode, "results": results, "referenceCounts": sales_reference_counts(db_path), "logs": logs}
+
+
 def current_inventory_validation(store: Store, account_name: str, validation_id: str) -> tuple[str, Path, int]:
     with sqlite3.connect(store.ledger) as conn:
         latest = conn.execute(
@@ -1890,6 +1948,10 @@ def handle(store: Store, request: dict[str, Any]) -> None:
             succeed(request_id, validate_open_sales_file(store, request_id, params))
         elif method == "previewOpenSalesRun":
             succeed(request_id, preview_open_sales_run(store, request_id, params))
+        elif method == "saveOpenSalesTemplate":
+            succeed(request_id, save_open_sales_template(store, params))
+        elif method == "syncOpenSalesReferences":
+            succeed(request_id, sync_open_sales_references(store, request_id, params))
         elif method == "inventoryPriceLists":
             succeed(request_id, inventory_price_lists(store, params))
         elif method == "previewInventoryRun":

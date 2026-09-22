@@ -256,7 +256,8 @@ h2 {
 
 .openSalesFlow {
   grid-template-areas:
-    "account source source"
+    "account refs refs"
+    "source source source"
     "validate validate run";
 }
 

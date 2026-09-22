@@ -449,6 +449,59 @@ def test_open_sales_validation_stages_orders_and_preview(tmp_path, monkeypatch, 
     assert preview["referenceCounts"]["validatedOrders"] == 1
 
 
+def test_open_sales_template_and_reference_sync_parity(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("TACOS_CREDENTIAL_BACKEND", "sqlite_plaintext")
+    monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))
+    store = app_store()
+    handle(store, _request(
+        "saveAccount",
+        {"accountName": "demo", "appRef": "app", "token": "secret", "region": "euw1"},
+        "save-1",
+    ))
+    capsys.readouterr()
+
+    template = tmp_path / "bp_sales_import.csv"
+    handle(store, _request("saveOpenSalesTemplate", {"destination": str(template)}, "sales-template"))
+    result = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
+    with template.open(encoding="utf-8", newline="") as file:
+        headers = next(csv.reader(file))
+    assert result["headers"] == headers
+    assert headers[:3] == ["order_ref", "placed_on", "tax_date"]
+
+    def reference_sync(*args, **kwargs):
+        with sqlite3.connect(args[3]) as conn:
+            conn.execute("CREATE TABLE ref_channels (channelId INTEGER)")
+            conn.execute("INSERT INTO ref_channels VALUES (1)")
+        return {"channels": 1}
+
+    def contacts_sync(*args, **kwargs):
+        with sqlite3.connect(args[1]) as conn:
+            conn.execute("CREATE TABLE contact_catalogue (contactId INTEGER)")
+            conn.execute("INSERT INTO contact_catalogue VALUES (2)")
+        return 1
+
+    def products_sync(*args, **kwargs):
+        with sqlite3.connect(args[1]) as conn:
+            conn.execute("CREATE TABLE product_catalogue (productId INTEGER)")
+            conn.execute("INSERT INTO product_catalogue VALUES (3)")
+        return 1
+
+    with (
+        patch.object(worker, "fetch_and_store_reference_tables", side_effect=reference_sync) as refs,
+        patch.object(worker, "update_contact_catalogue", side_effect=contacts_sync) as contacts,
+        patch.object(worker, "update_product_catalogue", side_effect=products_sync) as products,
+    ):
+        handle(store, _request("syncOpenSalesReferences", {"accountName": "demo", "mode": "all"}, "sales-refs"))
+    sync = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
+    refs.assert_called_once()
+    contacts.assert_called_once()
+    products.assert_called_once()
+    assert sync["results"] == {"reference": {"channels": 1}, "contacts": 1, "products": 1}
+    assert sync["referenceCounts"]["channels"] == 1
+    assert sync["referenceCounts"]["customers"] == 1
+    assert sync["referenceCounts"]["products"] == 1
+
+
 def test_inventory_validation_uses_account_price_list_and_blank_option(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("TACOS_CREDENTIAL_BACKEND", "sqlite_plaintext")
     monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))
