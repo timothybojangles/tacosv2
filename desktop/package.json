@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc && vite build",
-    "worker:build": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"Set-Location ..; .\\.venv\\Scripts\\python.exe -m PyInstaller --noconfirm --clean --hidden-import uuid --name tacos-engine --distpath desktop\\engine-dist --workpath build\\engine-pyinstaller --specpath build\\engine-pyinstaller desktop\\engine\\worker.py\"",
+    "worker:build": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"Set-Location ..; .\\.venv\\Scripts\\python.exe -m PyInstaller --noconfirm --clean --hidden-import uuid --hidden-import _duckdb --collect-all duckdb --name tacos-engine --distpath desktop\\engine-dist --workpath build\\engine-pyinstaller --specpath build\\engine-pyinstaller desktop\\engine\\worker.py\"",
     "worker:smoke": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-packaged-worker.ps1",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",

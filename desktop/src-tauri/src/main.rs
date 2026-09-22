@@ -107,6 +107,8 @@ fn validate_request(request: &Value) -> Result<(), String> {
     match method {
         "importSyntheticCsv"
         | "previewDataset"
+        | "goLiveOperations"
+        | "legacyOperations"
         | "listAccounts"
         | "saveAccount"
         | "removeAccount"

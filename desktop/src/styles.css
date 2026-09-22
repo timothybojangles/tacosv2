@@ -258,6 +258,79 @@ h2 {
   padding-left: 18px;
 }
 
+.operationSection + .operationSection {
+  margin-top: 22px;
+}
+
+.operationSection > h2 {
+  margin-bottom: 10px;
+}
+
+.operationGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.operationCard {
+  border: 1px solid #d9e1e8;
+  border-radius: 8px;
+  padding: 14px;
+  background: #fff;
+}
+
+.operationTitle {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.operationTitle h2 {
+  margin-bottom: 6px;
+}
+
+.statusActive,
+.statusPending {
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.statusActive {
+  background: #e7f1ec;
+  color: #23634d;
+}
+
+.statusPending {
+  background: #eef2f6;
+  color: #526273;
+}
+
+.operationCard dl {
+  display: grid;
+  grid-template-columns: 86px minmax(0, 1fr);
+  gap: 6px 10px;
+  margin: 12px 0;
+}
+
+.operationCard dt {
+  color: #64748b;
+  font-weight: 700;
+}
+
+.operationCard dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.operationCard button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .step,
 .panel {
   background: #fff;

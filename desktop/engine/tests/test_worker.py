@@ -118,7 +118,7 @@ def test_account_credentials_are_saved_without_mixing_data_dbs(tmp_path, monkeyp
         raise AssertionError("Different accounts should receive different data DB paths")
 
 
-def test_remove_account_disconnects_credentials_and_preserves_local_data(tmp_path, monkeypatch, capsys):
+def test_remove_account_deletes_credentials_and_local_data(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("TACOS_CREDENTIAL_BACKEND", "sqlite_plaintext")
     monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))
     store = app_store()
@@ -138,8 +138,8 @@ def test_remove_account_disconnects_credentials_and_preserves_local_data(tmp_pat
         "accountName": "remove-me", "confirmAccountName": "remove-me"
     }, "remove-confirmed"))
     result = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
-    assert result == {"removed": "remove-me", "dataPreserved": True}
-    assert removed_db.is_file()
+    assert result == {"removed": "remove-me", "dataRemoved": True}
+    assert not removed_db.exists()
     assert worker.read_credential("remove-me") is None
     assert worker.read_credential("keep-me") is not None
     handle(store, _request("listAccounts", request_id="accounts-after-remove"))
@@ -221,6 +221,54 @@ def test_inventory_reference_sync_calls_inventory_specific_legacy_steps(tmp_path
     refs.assert_called_once()
     locations.assert_called_once()
     prices.assert_called_once()
+
+
+def test_go_live_operations_expose_legacy_scope(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))
+    handle(app_store(), _request("legacyOperations", request_id="legacy-ops"))
+    result = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
+    operation_ids = [operation["id"] for operation in result["operations"]]
+    assert operation_ids[:4] == ["inventory_import", "open_sales", "open_purchases", "historic_sales"]
+    assert {"Go Live", "Configuration", "Maintenance", "Export", "API Tools", "Training"} <= set(result["categories"])
+    assert result["operations"][1]["legacyModules"] == ["validator_sales_orders.py", "sync_sales_orders.py"]
+
+
+def test_inventory_reference_sync_reports_persisted_product_progress(tmp_path, monkeypatch, capfd):
+    monkeypatch.setenv("TACOS_CREDENTIAL_BACKEND", "sqlite_plaintext")
+    monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))
+    store = app_store()
+    handle(store, _request("saveAccount", {
+        "accountName": "demo", "appRef": "app", "token": "secret", "region": "euw1"
+    }, "save-1"))
+    capfd.readouterr()
+    db_path = worker.account_data_db(store, "demo")
+
+    def product_sync(*args, **kwargs):
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "CREATE TABLE reference_sync_progress "
+                "(reference_name TEXT PRIMARY KEY, status TEXT, completed INTEGER, total INTEGER, message TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO reference_sync_progress VALUES "
+                "('products', 'running', 150000, 300000, 'Fetched products')"
+            )
+        kwargs["log_callback"]("Fetched product page")
+        return 300000
+
+    with (
+        patch.object(worker, "update_product_catalogue", side_effect=product_sync),
+        patch.object(worker, "fetch_and_store_reference_tables", return_value={"warehouses": 1}),
+        patch.object(worker, "update_location_catalogue", return_value=3),
+        patch.object(worker, "sync_inventory_pricelists", return_value={"price_lists": 4, "price_list_values": 5}),
+    ):
+        handle(store, _request("syncInventoryReferences", {"accountName": "demo"}, "sync-1"))
+
+    events = [json.loads(line) for line in capfd.readouterr().out.splitlines()]
+    progress = [event for event in events if event.get("type") == "event" and event.get("event") == "progress"]
+    assert progress[0]["data"]["completed"] == 150000
+    assert progress[0]["data"]["total"] == 300000
+    assert progress[0]["data"]["percent"] == 50
 
 
 def test_inventory_validation_returns_accepted_and_rejected_rows(tmp_path, monkeypatch, capsys):

@@ -21,7 +21,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 type WorkerResponse =
   | { ok: true; result: any }
-  | { ok: false; error: { code: string; message: string } };
+  | { ok: false; error: { code: string; message: string; guidance?: string } };
 
 type ReferenceCounts = {
   products: number;
@@ -45,9 +45,21 @@ type Account = {
 
 type PreviewRow = Record<string, unknown>;
 
+type LegacyOperation = {
+  id: string;
+  label: string;
+  category: string;
+  legacyView: string;
+  status: "active" | "foundation";
+  legacyModules: string[];
+  apiFamilies: string[];
+  workflow: string[];
+};
+
 const tabs = [
   { id: "accounts", label: "Accounts", icon: KeyRound },
   { id: "tasks", label: "Inventory", icon: FileSpreadsheet },
+  { id: "legacy", label: "Legacy Tools", icon: CheckCircle2 },
   { id: "data", label: "Data", icon: Database },
   { id: "history", label: "Job History", icon: History },
   { id: "settings", label: "Settings", icon: Settings },
@@ -64,7 +76,8 @@ async function engine(method: string, params: Record<string, unknown> = {}) {
     request: { protocolVersion: 1, id: requestId(method), method, params },
   })) as WorkerResponse;
   if (!response.ok) {
-    throw new Error(response.error?.message || "Worker request failed");
+    const detail = response.error?.message || "Worker request failed";
+    throw new Error(response.error?.guidance ? `${detail} ${response.error.guidance}` : detail);
   }
   return response.result;
 }
@@ -119,6 +132,8 @@ export default function App() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [syncProgress, setSyncProgress] = useState<{ percent: number; completed?: number; total?: number; message?: string } | null>(null);
+  const [legacyOperations, setLegacyOperations] = useState<LegacyOperation[]>([]);
+  const [legacyCategories, setLegacyCategories] = useState<string[]>([]);
 
   const activeAccount = accounts.find((account) => account.accountName === activeAccountName) || null;
   const counts = activeAccount?.referenceCounts || emptyCounts();
@@ -134,6 +149,12 @@ export default function App() {
 
   useEffect(() => {
     void refreshAccounts();
+    void engine("legacyOperations")
+      .then((result) => {
+        setLegacyOperations(result.operations || []);
+        setLegacyCategories(result.categories || []);
+      })
+      .catch((err) => setError(`Could not load legacy tool registry: ${errorMessage(err)}`));
     const unlisten = listen<any>("reference-sync-progress", ({ payload: data }) => {
       if (data?.operation !== "reference_sync") return;
       setSyncProgress((current) => ({
@@ -222,7 +243,7 @@ export default function App() {
     if (!activeAccountName) return;
     const accountName = activeAccountName;
     const confirmation = window.prompt(
-      `Type ${accountName} to disconnect it. Local account data and reports will be preserved.`,
+      `Type ${accountName} to permanently remove it. Credentials and the local data file will be deleted.`,
     );
     if (confirmation === null) return;
     await run("removeAccount", async () => {
@@ -230,7 +251,7 @@ export default function App() {
       setActiveAccountName("");
       setForm({ accountName: "", appRef: "", token: "", region: "euw1" });
       await refreshAccounts();
-      setMessage(`${accountName} disconnected. Its local data was preserved.`);
+      setMessage(`${accountName} removed. Credentials and local data file were deleted.`);
     });
   }
 
@@ -546,6 +567,51 @@ export default function App() {
               <p>Review the dry-run payload in Data before confirming a live run.</p>
             </section>
           </div>
+        )}
+
+        {activeTab === "legacy" && (
+          <section className="panel">
+            <div className="resultHeader">
+              <div>
+                <h2>Legacy Tool Workbench</h2>
+                <p>Parity map for the legacy TACOS modules being rebuilt on the new platform.</p>
+              </div>
+            </div>
+            {legacyCategories.map((category) => (
+              <div className="operationSection" key={category}>
+                <h2>{category}</h2>
+                <div className="operationGrid">
+                  {legacyOperations.filter((operation) => operation.category === category).map((operation) => (
+                    <article className="operationCard" key={operation.id}>
+                      <div className="operationTitle">
+                        <h2>{operation.label}</h2>
+                        <span className={operation.status === "active" ? "statusActive" : "statusPending"}>
+                          {operation.status === "active" ? "Active" : "Foundation"}
+                        </span>
+                      </div>
+                      <p>{operation.workflow.join(" -> ")}</p>
+                      <dl>
+                        <dt>Legacy</dt>
+                        <dd>{operation.legacyModules.join(", ")}</dd>
+                        <dt>Brightpearl</dt>
+                        <dd>{operation.apiFamilies.join(", ")}</dd>
+                      </dl>
+                      {operation.id === "inventory_import" && (
+                        <button onClick={() => setActiveTab("tasks")}>
+                          <FileSpreadsheet size={18} />
+                          Open inventory workflow
+                        </button>
+                      )}
+                    </article>
+                  ))}
+                  {!legacyOperations.filter((operation) => operation.category === category).length && (
+                    <p className="empty">No operations in this category.</p>
+                  )}
+                </div>
+              </div>
+            ))}
+            {!legacyOperations.length && <p className="empty">No legacy operations loaded.</p>}
+          </section>
         )}
 
         {activeTab === "data" && (

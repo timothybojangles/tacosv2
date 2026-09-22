@@ -57,3 +57,72 @@ not be treated as intentionally removed functionality.
 | UPD-001 | Dropbox whole-EXE launcher and incomplete changed-file ZIP path | Offline authenticated component update; deletions, base-version checks, rollback | phase-1 Windows package test |
 
 Endpoint request/response fixtures must be verified against current official Brightpearl documentation and the test account during each port. Existing behaviour is evidence of scope, not an oracle for correctness.
+
+## Refactor Plan By Legacy Menu
+
+The new app must preserve the legacy menu families. Do not collapse every tool into one generic module; shared infrastructure should sit underneath distinct task surfaces.
+
+1. File, Settings and Help
+   - Port Add account, Remove active account, Quit, Global Settings, Compact UI mode, About, app logo/theme behavior and progress/log panels.
+   - Improve by using OS credential storage, account-bound data paths, clearer destructive-action prompts, searchable job history, readable error guidance and exportable logs.
+   - Keep settings from `brightpearl/settings.py`: retry limits, log level, output folders, appearance, resolution and stock correction batch size.
+
+2. Shared Platform Foundation
+   - Build one operation model used by every module: source selection, mapping, validation, preview, run, checkpoint, resume/reconcile and review.
+   - Keep reusable legacy helpers: `common`, `throttle`, `csv_safety`, `row_validation`, `reference_data`, `performance`, account binding and processing markers.
+   - Standardize friendly errors: what happened, affected row/business id, why it matters, how to fix it, whether retry is safe.
+   - Store jobs, steps, attempts, source identity, reference versions, payload hashes, output files and Brightpearl response summaries.
+
+3. Configuration Tools
+   - Contact Import: preserve contact catalogue sync, full contact validation, contact creation/update, price lists, tax/currency/staff-owner lookups and duplicate email checks.
+   - Multiple Addresses: keep address CSV template, address validation, address creation/update and contact/address linking as a separate surface.
+   - Product Import: preserve product templates, reference sync, supplier/contact catalogue, variants, bundles, brands/types/categories/options, missing reference creation, product creation and product id/SKU export.
+   - Product Updates: preserve update picker, update template/config, update catalogue sync, sales channels, categories, variations, seasons, bundle components and update reference creation.
+   - Custom Fields: preserve customer, supplier, product, sales and purchase custom-field metadata sync; CSV validation; typed value parsing; order catalogue sync; and Brightpearl patch execution.
+   - Warehouse Locations: preserve warehouse sync, location catalogue sync, templates, all-location export, create validation/sync and update validation/sync.
+   - Warehouse Zones: preserve zone catalogue sync, template, validation and create sync.
+
+4. Go Live Tools
+   - Inventory Import remains the reference implementation.
+   - Open Sales: preserve order grouping, row validation, warehouse/status/country lookup, order creation, row posting, payment posting and failed-order CSV output.
+   - Open Purchases: preserve purchase order grouping, row validation, warehouse/status lookup, order creation, row posting, purchase payment payloads and failed CSV output.
+   - Historic Sales: preserve complete-order grouping, header/row validation, date parsing, warehouse/status/country lookup, order creation and row posting.
+   - Improve all order tools with grouped previews, per-order checkpoints, payment as an independent step, no blind replay after uncertain writes and reconciliation prompts.
+
+5. Maintenance Tools
+   - Forget Contact (GDPR): preserve contact-id CSV import, forget-contact catalogue sync, contact forget execution, related order forget execution, failed CSVs and processed markers.
+   - Warehouse Service Maintenance: preserve warehouse selector, task CSV import, product availability lookup, stock correction, correction note lookup, restore quantity logic, single/multi payload modes and progress.
+   - Improve both with target previews, typed confirmation for irreversible actions, audit records and plain-language outcomes.
+
+6. Export Tools
+   - Product Catalogue Export: preserve reference sync, pricelist sync, supplier sync, product detail download, custom fields, reference-name resolution and CSV export.
+   - IP Stock History: preserve audit CSV import, date parsing, warehouse filtering and per-warehouse export.
+   - Improve with freshness indicators, filters, resumable downloads and saved export presets.
+
+7. Experimental / Power Tools
+   - SYNC: preserve aggregate sync actions from `run_all_syncs`, `run_inventory_import_syncs` and related reference refreshes, but rename into a clearer reference-data dashboard.
+   - Shoot APIs: preserve URL normalization, variables, variables data table, JSON payload parsing, response mapping, saved loadouts, failed/run logs, 207 retry visibility, variable CSV import/run and chains.
+   - IC Training Helper: preserve defaults check, dummy customer/product/shipping method, demo sales order/payment, quick stock, do-it-all, inventory reference values and random allocation.
+   - Improve by separating production tools from training/demo tools and making chain execution inspectable before running.
+
+8. Packaging and Update Tooling
+   - Treat `launcher.py`, `build_update_bundle.py`, PyInstaller/Tauri packaging and installer generation as platform work, not business functionality.
+   - Do not carry `update.py` forward as an updater; it is contact catalogue code with misleading filename and unresolved references.
+   - Preserve CSV/XLSX compatibility and exported file formats where users depend on them.
+
+9. Porting Order
+   - Finish Inventory Import gaps first: templates, cancellation, freshness display and guided reconciliation.
+   - Port Open Sales next because it has the known SO-001 retry/payment risk.
+   - Then Open Purchases and Historic Sales using the same order engine.
+   - Then Contact Import and Multiple Addresses.
+   - Then Product Import/Updates and Custom Fields.
+   - Then Warehouse Locations/Zones and Warehouse Service Maintenance.
+   - Then Exports, API Shooter/Chains and IC Training Helper.
+
+10. Definition of Done For Each Module
+   - Legacy menu item exists under the same family in the new app.
+   - Every legacy button/action/template/export has a new equivalent or a documented retirement decision.
+   - Endpoint contracts checked against current Brightpearl docs before implementation.
+   - Validation errors are row-specific and user-fixable.
+   - Writes are checkpointed and safe against duplicate replay after uncertain outcomes.
+   - Tests cover validation, payload shape, failure handling, progress and resume/reconcile behavior.

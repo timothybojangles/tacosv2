@@ -4,6 +4,7 @@ import csv
 import ctypes
 import ctypes.wintypes
 import contextlib
+import gc
 import hashlib
 import json
 import math
@@ -36,6 +37,166 @@ MAX_MESSAGE_BYTES = 64 * 1024
 MAX_PAGE_SIZE = 500
 SUPPORTED_REGIONS = {"euw1", "use1"}
 INVENTORY_HEADERS = ["sku", "quantity", "locationName", "costprice", "warehouseId"]
+
+LEGACY_OPERATIONS: list[dict[str, Any]] = [
+    {
+        "id": "inventory_import",
+        "label": "Inventory Import",
+        "category": "Go Live",
+        "legacyView": "inventory_import",
+        "status": "active",
+        "legacyModules": ["validator.py", "sync.py", "brightpearl/inventory_import.py", "brightpearl/inventory_pricelists.py"],
+        "apiFamilies": ["Product search", "Warehouse search/location", "Product availability", "Stock correction"],
+        "workflow": ["Sync references", "Validate CSV/XLSX", "Preview corrections", "Run confirmed stock corrections"],
+    },
+    {
+        "id": "open_sales",
+        "label": "Open Sales",
+        "category": "Go Live",
+        "legacyView": "open_sales",
+        "status": "foundation",
+        "legacyModules": ["validator_sales_orders.py", "sync_sales_orders.py"],
+        "apiFamilies": ["Order POST", "Sales order rows", "Sales payments"],
+        "workflow": ["Validate order groups", "Create sales orders", "Add rows", "Checkpoint payments"],
+    },
+    {
+        "id": "open_purchases",
+        "label": "Open Purchases",
+        "category": "Go Live",
+        "legacyView": "open_purchases",
+        "status": "foundation",
+        "legacyModules": ["validator_open_purchases.py", "sync_open_purchases.py"],
+        "apiFamilies": ["Order POST", "Purchase order rows", "Purchase payments"],
+        "workflow": ["Validate purchase groups", "Create purchase orders", "Add rows", "Checkpoint payments"],
+    },
+    {
+        "id": "historic_sales",
+        "label": "Historic Sales",
+        "category": "Go Live",
+        "legacyView": "historic_sales",
+        "status": "foundation",
+        "legacyModules": ["validator_historic_orders.py", "sync_historic_orders.py"],
+        "apiFamilies": ["Order POST", "Order rows", "Sales payments"],
+        "workflow": ["Validate historic order groups", "Create closed/history orders", "Add rows", "Checkpoint payments"],
+    },
+    {
+        "id": "contact_import",
+        "label": "Contact Import",
+        "category": "Configuration",
+        "legacyView": "contact_import",
+        "status": "foundation",
+        "legacyModules": ["validator_contacts.py", "sync_contacts.py", "brightpearl/additional_addresses.py"],
+        "apiFamilies": ["Contact search", "Postal address", "Contact create/update"],
+        "workflow": ["Sync contact catalogue", "Validate contacts/addresses", "Create addresses", "Create/link contacts"],
+    },
+    {
+        "id": "product_import_update",
+        "label": "Product Import and Update",
+        "category": "Configuration",
+        "legacyView": "product_import",
+        "status": "foundation",
+        "legacyModules": ["brightpearl/product_import.py", "row_validation.py"],
+        "apiFamilies": ["Product references", "Product create", "Product update", "Product options/variations/bundles"],
+        "workflow": ["Sync references", "Validate products", "Create missing references", "Create/update products"],
+    },
+    {
+        "id": "custom_fields",
+        "label": "Custom Fields",
+        "category": "Configuration",
+        "legacyView": "custom_fields",
+        "status": "foundation",
+        "legacyModules": ["brightpearl/custom_fields.py"],
+        "apiFamilies": ["Custom field metadata", "Contact/Product/Order custom fields", "Order catalogue"],
+        "workflow": ["Sync metadata", "Validate typed values", "Preview patches", "Apply custom field updates"],
+    },
+    {
+        "id": "warehouse_locations_zones",
+        "label": "Warehouse Locations and Zones",
+        "category": "Configuration",
+        "legacyView": "warehouse_locations",
+        "status": "foundation",
+        "legacyModules": ["brightpearl/warehouse_locations.py", "brightpearl/warehouse_zones.py"],
+        "apiFamilies": ["Warehouse search", "Location search/create/update", "Zone search/create"],
+        "workflow": ["Sync warehouse references", "Validate locations/zones", "Create or update records", "Export reference CSVs"],
+    },
+    {
+        "id": "gdpr_forget",
+        "label": "Forget Contacts",
+        "category": "Maintenance",
+        "legacyView": "forget_contact",
+        "status": "foundation",
+        "legacyModules": ["forget_contacts.py", "brightpearl/forget_contact.py"],
+        "apiFamilies": ["Contact search", "Forget contact", "Related orders"],
+        "workflow": ["Sync forget catalogue", "Preview targets", "Confirm irreversible action", "Record outcomes"],
+    },
+    {
+        "id": "warehouse_service_maintenance",
+        "label": "Warehouse Service Maintenance",
+        "category": "Maintenance",
+        "legacyView": "warehouse_service_maintenance",
+        "status": "foundation",
+        "legacyModules": ["brightpearl/warehouse_service_maintenance.py"],
+        "apiFamilies": ["Product availability", "Stock correction", "Goods note correction"],
+        "workflow": ["Import task CSV", "Preview warehouse stock moves", "Run checkpointed corrections", "Review notes"],
+    },
+    {
+        "id": "product_catalogue_export",
+        "label": "Product Catalogue Export",
+        "category": "Export",
+        "legacyView": "export_product_catalogue",
+        "status": "foundation",
+        "legacyModules": ["brightpearl/product_catalogue_export.py"],
+        "apiFamilies": ["Product search", "Product details", "Suppliers", "Price lists"],
+        "workflow": ["Sync export dataset", "Refresh suppliers/prices", "Filter dataset", "Export CSV"],
+    },
+    {
+        "id": "ip_stock_history",
+        "label": "IP Stock History",
+        "category": "Export",
+        "legacyView": "ip_stock_history",
+        "status": "foundation",
+        "legacyModules": ["brightpearl/ip_stock_history.py"],
+        "apiFamilies": ["Local audit import", "Warehouse/date export"],
+        "workflow": ["Import audit CSV", "Validate dates/warehouses", "Filter stock history", "Export by warehouse"],
+    },
+    {
+        "id": "api_shooter",
+        "label": "API Shooter and Chains",
+        "category": "API Tools",
+        "legacyView": "shoot_apis",
+        "status": "foundation",
+        "legacyModules": ["brightpearl/shoot_api.py"],
+        "apiFamilies": ["Any Brightpearl endpoint", "Variables", "Response mappings", "Saved chains"],
+        "workflow": ["Build request", "Map variables", "Run single/bulk requests", "Chain ordered steps"],
+    },
+    {
+        "id": "training_helper",
+        "label": "IC Training Helper",
+        "category": "Training",
+        "legacyView": "ic_training_helper",
+        "status": "foundation",
+        "legacyModules": ["brightpearl/ic_training_helper.py"],
+        "apiFamilies": ["Dummy contacts/products", "Sales orders", "Payments", "Stock corrections"],
+        "workflow": ["Check defaults", "Create demo data", "Create demo orders", "Allocate demo inventory"],
+    },
+]
+
+GO_LIVE_OPERATIONS = [operation for operation in LEGACY_OPERATIONS if operation["category"] == "Go Live"]
+
+ERROR_GUIDANCE = {
+    "credentials_missing": "Open Accounts, save credentials for this account, then try again.",
+    "credential_check_failed": "Check the account name, region, app ref and token. If they look right, try again after confirming Brightpearl is reachable.",
+    "source_missing": "Choose the source file again. It may have been moved, renamed or deleted.",
+    "unsupported_source": "Use one of the supported file types for this tool.",
+    "invalid_price_list": "Sync required data, then pick a price list that belongs to this account.",
+    "stale_validation": "Validate the source again so the preview matches the latest references.",
+    "confirmation_required": "Type the account name exactly as shown, including hyphens or underscores.",
+    "resume_required": "Finish, resume or reconcile the current run before starting another one.",
+    "reconciliation_required": "Check Brightpearl for the last attempted write, then mark or rerun only after you know the outcome.",
+    "write_uncertain": "Do not retry blindly. Check Brightpearl first so the same business action is not sent twice.",
+    "report_missing": "Rebuild the preview or exception report; the temporary file is no longer available.",
+    "worker_error": "Try the action again. If it repeats, check Job History and send the exact message to support.",
+}
 
 
 class WorkerError(Exception):
@@ -151,6 +312,23 @@ def account_data_db(store: Store, account_name: str) -> Path:
     return path
 
 
+def unlink_sqlite_file(path: Path) -> bool:
+    if not path.exists():
+        return False
+    last_error: OSError | None = None
+    for _ in range(8):
+        gc.collect()
+        try:
+            path.unlink()
+            return True
+        except OSError as exc:
+            last_error = exc
+            time.sleep(0.1)
+    if last_error:
+        raise last_error
+    return False
+
+
 def ensure_no_open_inventory_run(store: Store, account_name: str) -> None:
     with sqlite3.connect(account_data_db(store, account_name)) as conn:
         try:
@@ -254,6 +432,31 @@ def reference_counts(db_path: Path) -> dict[str, int]:
             except sqlite3.OperationalError:
                 result[key] = 0
     return result
+
+
+def reference_sync_progress(db_path: Path, reference_name: str) -> dict[str, Any]:
+    try:
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT status, completed, total, message FROM reference_sync_progress WHERE reference_name = ?",
+                (reference_name,),
+            ).fetchone()
+    except sqlite3.OperationalError:
+        return {}
+    if not row:
+        return {}
+    status, completed, total, message = row
+    progress: dict[str, Any] = {
+        "stage": reference_name,
+        "status": status,
+        "completed": int(completed or 0),
+        "message": message,
+    }
+    if total is not None:
+        progress["total"] = int(total)
+        if int(total) > 0:
+            progress["percent"] = min(100, int((int(completed or 0) / int(total)) * 100))
+    return progress
 
 
 class CREDENTIAL(ctypes.Structure):
@@ -392,6 +595,19 @@ def list_accounts(store: Store) -> dict[str, Any]:
     return {"accounts": [account_summary(store, row[0]) for row in rows]}
 
 
+def go_live_operations() -> dict[str, Any]:
+    return {"operations": GO_LIVE_OPERATIONS}
+
+
+def legacy_operations() -> dict[str, Any]:
+    categories = []
+    for operation in LEGACY_OPERATIONS:
+        category = operation["category"]
+        if category not in categories:
+            categories.append(category)
+    return {"operations": LEGACY_OPERATIONS, "categories": categories}
+
+
 def save_account(store: Store, params: dict[str, Any]) -> dict[str, Any]:
     account_name = normalize_account_name(params.get("accountName"))
     ensure_no_open_inventory_run(store, account_name)
@@ -412,19 +628,23 @@ def save_account(store: Store, params: dict[str, Any]) -> dict[str, Any]:
 def remove_account(store: Store, params: dict[str, Any]) -> dict[str, Any]:
     account_name = normalize_account_name(params.get("accountName"))
     if params.get("confirmAccountName") != account_name:
-        raise WorkerError("confirmation_required", "Type the selected account name to disconnect it.")
+        raise WorkerError("confirmation_required", "Type the selected account name to permanently remove it.")
     with sqlite3.connect(store.ledger) as conn:
         if not conn.execute("SELECT 1 FROM accounts WHERE account_name = ?", (account_name,)).fetchone():
             raise WorkerError("account_missing", "Account is not registered.")
     ensure_no_open_inventory_run(store, account_name)
+    data_db_path = account_data_db(store, account_name)
     delete_credential(store, account_name)
     compatibility_db = store.root / "db" / "credentials.db"
     if compatibility_db.is_file():
         with sqlite3.connect(compatibility_db) as conn:
             conn.execute("DELETE FROM credentials WHERE account_name = ?", (account_name,))
+    data_removed = False
+    if data_db_path.exists():
+        data_removed = unlink_sqlite_file(data_db_path)
     with sqlite3.connect(store.ledger) as conn:
         conn.execute("DELETE FROM accounts WHERE account_name = ?", (account_name,))
-    return {"removed": account_name, "dataPreserved": True}
+    return {"removed": account_name, "dataRemoved": data_removed}
 
 
 def credentials_for_account(store: Store, account_name: str) -> Credentials:
@@ -480,6 +700,7 @@ def sync_inventory_references(store: Store, request_id: str, params: dict[str, A
         if product_count:
             event.update({"stage": "products", "completed": int(product_count.group(1)),
                           "total": int(product_count.group(2))})
+        event.update(reference_sync_progress(db_path, "products"))
         emit_event(request_id, "progress", event)
 
     with legacy_operation(store):
@@ -1143,7 +1364,11 @@ def output(payload: dict[str, Any]) -> None:
             },
             separators=(",", ":"),
         )
-    print(line, flush=True)
+    if isinstance(sys.stdout, _DiscardLegacyOutput):
+        sys.__stdout__.write(line + "\n")
+        sys.__stdout__.flush()
+    else:
+        print(line, flush=True)
 
 
 def fail(request_id: Any, code: str, message: str) -> None:
@@ -1153,7 +1378,11 @@ def fail(request_id: Any, code: str, message: str) -> None:
             "type": "response",
             "id": request_id,
             "ok": False,
-            "error": {"code": code, "message": message},
+            "error": {
+                "code": code,
+                "message": message,
+                "guidance": ERROR_GUIDANCE.get(code, ERROR_GUIDANCE["worker_error"]),
+            },
         }
     )
 
@@ -1347,6 +1576,10 @@ def handle(store: Store, request: dict[str, Any]) -> None:
             succeed(request_id, preview_dataset(store, params))
         elif method == "listAccounts":
             succeed(request_id, list_accounts(store))
+        elif method == "goLiveOperations":
+            succeed(request_id, go_live_operations())
+        elif method == "legacyOperations":
+            succeed(request_id, legacy_operations())
         elif method == "saveAccount":
             succeed(request_id, save_account(store, params))
         elif method == "removeAccount":
