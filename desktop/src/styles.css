@@ -705,11 +705,36 @@ th {
 
 .job {
   display: grid;
-  grid-template-columns: 180px 140px minmax(0, 1fr);
+  grid-template-columns: 170px 110px 180px 80px minmax(0, 1fr);
   gap: 12px;
   align-items: center;
   padding: 10px 0;
   border-bottom: 1px solid var(--border);
+}
+
+.jobState {
+  border-radius: 6px;
+  padding: 4px 8px;
+  width: fit-content;
+  background: var(--surface-muted);
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.state-succeeded {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.state-failed,
+.state-rejected {
+  background: #fff1f0;
+  color: #9f1d1d;
+}
+
+.state-running {
+  background: #eef4ff;
+  color: #2357a3;
 }
 
 code {
@@ -750,6 +775,42 @@ code {
   margin-bottom: 12px;
 }
 
+.resultHeader > button,
+.resultHeader .toolbar button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  border: 0;
+  border-radius: 8px;
+  padding: 0 12px;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+}
+
+.logViewer {
+  min-height: 360px;
+  max-height: 58vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--pre-bg);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.environmentGrid {
+  grid-template-columns: 160px minmax(0, 1fr);
+}
+
+.environmentGrid dd {
+  min-width: 0;
+}
+
 .spin {
   animation: spin 0.8s linear infinite;
 }
@@ -772,7 +833,9 @@ code {
   .taskFlow,
   .settingsGrid,
   .accountPanel,
-  .formGrid {
+  .formGrid,
+  .operationGrid,
+  .job {
     grid-template-columns: 1fr;
   }
 

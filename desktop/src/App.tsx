@@ -6,10 +6,12 @@ import {
   CheckCircle2,
   Database,
   Download,
+  FileText,
   FileSearch,
   FileSpreadsheet,
   FolderOpen,
   History,
+  Info,
   KeyRound,
   Loader2,
   Lock,
@@ -64,7 +66,9 @@ const tabs = [
   { id: "legacy", label: "Legacy Tools", icon: CheckCircle2 },
   { id: "data", label: "Data", icon: Database },
   { id: "history", label: "Job History", icon: History },
+  { id: "logs", label: "Logs", icon: FileText },
   { id: "settings", label: "Settings", icon: Settings },
+  { id: "help", label: "Help", icon: Info },
 ];
 
 const inventoryHeaders = ["sku", "quantity", "locationName", "costprice", "warehouseId"];
@@ -151,6 +155,12 @@ export default function App() {
   const [legacyCategories, setLegacyCategories] = useState<string[]>([]);
   const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
   const [settingsPath, setSettingsPath] = useState("");
+  const [logs, setLogs] = useState<any[]>([]);
+  const [selectedLogId, setSelectedLogId] = useState("sync");
+  const [logContent, setLogContent] = useState("");
+  const [logPath, setLogPath] = useState("");
+  const [logTruncated, setLogTruncated] = useState(false);
+  const [environment, setEnvironment] = useState<any>(null);
 
   const activeAccount = accounts.find((account) => account.accountName === activeAccountName) || null;
   const counts = activeAccount?.referenceCounts || emptyCounts();
@@ -173,6 +183,7 @@ export default function App() {
       })
       .catch((err) => setError(`Could not load legacy tool registry: ${errorMessage(err)}`));
     void loadAppSettings();
+    void loadEnvironment();
     const unlisten = listen<any>("reference-sync-progress", ({ payload: data }) => {
       if (data?.operation !== "reference_sync") return;
       setSyncProgress((current) => ({
@@ -410,6 +421,30 @@ export default function App() {
     });
   }
 
+  async function loadLogs(logId = selectedLogId) {
+    const listing = await engine("appLogs");
+    setLogs(listing.logs || []);
+    const nextId = (listing.logs || []).some((log: any) => log.id === logId) ? logId : (listing.logs?.[0]?.id || "sync");
+    setSelectedLogId(nextId);
+    const result = await engine("readAppLog", { id: nextId, maxChars: 90000 });
+    setLogContent(result.content || "");
+    setLogPath(result.path || "");
+    setLogTruncated(!!result.truncated);
+  }
+
+  async function exportLog() {
+    const selected = logs.find((log) => log.id === selectedLogId);
+    const destination = await save({
+      defaultPath: selected?.path?.split(/[\\/]/).pop() || "tacos-log.txt",
+      filters: [{ name: "Log file", extensions: ["log", "txt"] }],
+    });
+    if (typeof destination !== "string") return;
+    await run("exportLog", async () => {
+      const result = await engine("exportAppLog", { id: selectedLogId, destination });
+      setMessage(`Log exported to ${result.path}.`);
+    });
+  }
+
   async function loadAppSettings() {
     const result = await engine("appSettings");
     setAppSettings(result.settings);
@@ -428,6 +463,11 @@ export default function App() {
 
   function updateSetting(key: string, value: string) {
     setAppSettings((current) => current ? { ...current, [key]: value } : current);
+  }
+
+  async function loadEnvironment() {
+    const result = await engine("appEnvironment");
+    setEnvironment(result);
   }
 
   return (
@@ -458,6 +498,8 @@ export default function App() {
                 onClick={() => {
                   setActiveTab(tab.id);
                   if (tab.id === "history") void refreshHistory();
+                  if (tab.id === "logs") void loadLogs();
+                  if (tab.id === "help") void loadEnvironment();
                 }}
               >
                 <Icon size={18} />
@@ -736,21 +778,69 @@ export default function App() {
 
         {activeTab === "history" && (
           <section className="panel">
-            <div className="toolbar">
-              <History size={18} />
+            <div className="resultHeader">
+              <div>
+                <h2>Job History</h2>
+                <p>Recent local work, including validation, sync and live run checkpoints.</p>
+              </div>
               <button onClick={refreshHistory} disabled={!!busy}>
-                <RefreshCw size={18} />
-                Refresh
+                <RefreshCw size={18} /> Refresh
               </button>
             </div>
             {jobs.map((job) => (
               <article className="job" key={job.id}>
                 <strong>{job.kind}</strong>
-                <span>{job.state}</span>
-                <code>{job.dataset_id || job.source_path}</code>
+                <span className={`jobState state-${String(job.state || "").replaceAll("_", "-")}`}>{job.state}</span>
+                <span>{formatTime(job.updated_at)}</span>
+                <span>{job.durationSeconds ? `${job.durationSeconds}s` : "-"}</span>
+                <code>{job.message || job.dataset_id || job.source_path || job.id}</code>
               </article>
             ))}
             {!jobs.length && <p className="empty">No local jobs recorded yet.</p>}
+          </section>
+        )}
+
+        {activeTab === "logs" && (
+          <section className="panel">
+            <div className="resultHeader">
+              <div>
+                <h2>Logs</h2>
+                <p>Read and export TACOS diagnostic logs from the active data folder.</p>
+              </div>
+              <div className="toolbar">
+                <select value={selectedLogId} onChange={(event) => { setSelectedLogId(event.target.value); void loadLogs(event.target.value); }}>
+                  {logs.map((log) => <option key={log.id} value={log.id}>{log.label}</option>)}
+                </select>
+                <button onClick={() => void loadLogs()} disabled={!!busy}><RefreshCw size={18} /> Refresh</button>
+                <button onClick={exportLog} disabled={!!busy || !logContent}><Download size={18} /> Export</button>
+              </div>
+            </div>
+            {logPath && <p className="meta"><code>{logPath}</code>{logTruncated ? " - showing latest entries" : ""}</p>}
+            <pre className="logViewer">{logContent || "No log entries yet."}</pre>
+          </section>
+        )}
+
+        {activeTab === "help" && (
+          <section className="panel">
+            <div className="resultHeader">
+              <div>
+                <h2>About TACOS</h2>
+                <p>Desktop migration of the legacy Brightpearl Pro Serv multi-tool.</p>
+              </div>
+            </div>
+            {environment && (
+              <dl className="environmentGrid">
+                <dt>App</dt><dd>{environment.productName} {environment.desktopVersion}</dd>
+                <dt>Legacy baseline</dt><dd>{environment.legacyVersion}</dd>
+                <dt>Worker protocol</dt><dd>{environment.protocolVersion}</dd>
+                <dt>Python</dt><dd>{environment.pythonVersion}</dd>
+                <dt>Platform</dt><dd>{environment.platform}</dd>
+                <dt>Data root</dt><dd><code>{environment.dataRoot}</code></dd>
+                <dt>Job ledger</dt><dd><code>{environment.ledgerPath}</code></dd>
+                <dt>Settings</dt><dd><code>{environment.settingsPath}</code></dd>
+              </dl>
+            )}
+            <p className="meta">Legacy features are being refactored only where they can be made functional in the new platform. Inert controls should be hidden or marked not ported.</p>
           </section>
         )}
 

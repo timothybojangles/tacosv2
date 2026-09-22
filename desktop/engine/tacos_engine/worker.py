@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import os
+import platform
 import re
 import shutil
 import sqlite3
@@ -24,7 +25,16 @@ from typing import Any
 import duckdb
 import requests
 
-from brightpearl.common import Credentials, connect_sqlite, ensure_account_binding, mark_rows_processed, unprocessed_where_clause
+from brightpearl.common import (
+    DEBUG_LOG,
+    PAYLOAD_LOG,
+    SYNC_DEBUG_LOG,
+    Credentials,
+    connect_sqlite,
+    ensure_account_binding,
+    mark_rows_processed,
+    unprocessed_where_clause,
+)
 from brightpearl.throttle import parse_int_header, throttle_decision
 from brightpearl.inventory_import import update_product_catalogue
 from brightpearl.inventory_pricelists import sync_inventory_pricelists
@@ -38,6 +48,13 @@ MAX_MESSAGE_BYTES = 64 * 1024
 MAX_PAGE_SIZE = 500
 SUPPORTED_REGIONS = {"euw1", "use1"}
 INVENTORY_HEADERS = ["sku", "quantity", "locationName", "costprice", "warehouseId"]
+DESKTOP_APP_VERSION = "0.1.5"
+LEGACY_APP_VERSION = "1.3.007"
+KNOWN_LOGS = {
+    "api": {"label": "Brightpearl API", "fileName": DEBUG_LOG},
+    "sync": {"label": "Sync", "fileName": SYNC_DEBUG_LOG},
+    "payload": {"label": "Payload", "fileName": PAYLOAD_LOG},
+}
 
 LEGACY_OPERATIONS: list[dict[str, Any]] = [
     {
@@ -609,7 +626,7 @@ def legacy_operations() -> dict[str, Any]:
     return {"operations": LEGACY_OPERATIONS, "categories": categories}
 
 
-def app_settings_payload() -> dict[str, Any]:
+def settings_payload() -> dict[str, Any]:
     return {
         "settings": asdict(get_settings()),
         "settingsPath": str((Path.cwd() / settings_path()).resolve()),
@@ -622,13 +639,89 @@ def app_settings_payload() -> dict[str, Any]:
     }
 
 
-def update_app_settings(params: dict[str, Any]) -> dict[str, Any]:
+def app_settings_payload(store: Store) -> dict[str, Any]:
+    with legacy_cwd(store):
+        return settings_payload()
+
+
+def update_app_settings(store: Store, params: dict[str, Any]) -> dict[str, Any]:
     raw = params.get("settings") if isinstance(params.get("settings"), dict) else params
-    current = asdict(get_settings())
-    current.update(raw)
-    updated = normalize_settings(current)
-    save_settings(updated)
-    return {"settings": asdict(updated), "settingsPath": str((Path.cwd() / settings_path()).resolve())}
+    with legacy_cwd(store):
+        current = asdict(get_settings())
+        current.update(raw)
+        updated = normalize_settings(current)
+        save_settings(updated)
+        return settings_payload()
+
+
+def _log_path(file_name: str) -> Path:
+    base_dir = Path(get_settings().log_output_dir)
+    if not base_dir.is_absolute():
+        base_dir = Path.cwd() / base_dir
+    return (base_dir / file_name).resolve()
+
+
+def app_logs(store: Store) -> dict[str, Any]:
+    logs = []
+    with legacy_cwd(store):
+        for log_id, meta in KNOWN_LOGS.items():
+            path = _log_path(meta["fileName"])
+            stat = path.stat() if path.exists() else None
+            logs.append({
+                "id": log_id,
+                "label": meta["label"],
+                "path": str(path),
+                "exists": stat is not None,
+                "size": stat.st_size if stat else 0,
+                "updatedAt": stat.st_mtime if stat else None,
+            })
+    return {"logs": logs}
+
+
+def _selected_log_path(params: dict[str, Any]) -> Path:
+    log_id = str(params.get("id") or params.get("logId") or "")
+    if log_id not in KNOWN_LOGS:
+        raise WorkerError("invalid_log", "Choose one of the available log files.")
+    return _log_path(KNOWN_LOGS[log_id]["fileName"])
+
+
+def read_app_log(store: Store, params: dict[str, Any]) -> dict[str, Any]:
+    max_chars = min(max(int(params.get("maxChars", 60000) or 60000), 1000), 250000)
+    with legacy_cwd(store):
+        path = _selected_log_path(params)
+        if not path.exists():
+            return {"content": "", "path": str(path), "truncated": False}
+        content = path.read_text(encoding="utf-8", errors="replace")
+    truncated = len(content) > max_chars
+    return {"content": content[-max_chars:], "path": str(path), "truncated": truncated}
+
+
+def export_app_log(store: Store, params: dict[str, Any]) -> dict[str, Any]:
+    destination = Path(str(params.get("destination", ""))).expanduser()
+    if not destination.parent.exists():
+        raise WorkerError("invalid_destination", "Choose a destination in an existing folder.")
+    with legacy_cwd(store):
+        source = _selected_log_path(params)
+        if not source.exists():
+            raise WorkerError("report_missing", "That log file has not been created yet.")
+        shutil.copyfile(source, destination)
+    return {"path": str(destination)}
+
+
+def app_environment(store: Store) -> dict[str, Any]:
+    with legacy_cwd(store):
+        settings_file = str((Path.cwd() / settings_path()).resolve())
+    return {
+        "productName": "TACOS Desktop",
+        "desktopVersion": DESKTOP_APP_VERSION,
+        "legacyVersion": LEGACY_APP_VERSION,
+        "protocolVersion": PROTOCOL_VERSION,
+        "pythonVersion": platform.python_version(),
+        "platform": platform.platform(),
+        "dataRoot": str(store.root.resolve()),
+        "ledgerPath": str(store.ledger.resolve()),
+        "settingsPath": settings_file,
+    }
 
 
 def save_account(store: Store, params: dict[str, Any]) -> dict[str, Any]:
@@ -1577,9 +1670,14 @@ def job_history(store: Store) -> dict[str, Any]:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT id, kind, state, source_path, dataset_id, created_at, updated_at, message "
-            "FROM jobs ORDER BY updated_at DESC LIMIT 50"
+            "FROM jobs ORDER BY updated_at DESC LIMIT 100"
         ).fetchall()
-    return {"jobs": [dict(row) for row in rows]}
+    jobs = []
+    for row in rows:
+        item = dict(row)
+        item["durationSeconds"] = max(0, round(float(item["updated_at"] or 0) - float(item["created_at"] or 0), 2))
+        jobs.append(item)
+    return {"jobs": jobs}
 
 
 def handle(store: Store, request: dict[str, Any]) -> None:
@@ -1604,9 +1702,17 @@ def handle(store: Store, request: dict[str, Any]) -> None:
         elif method == "legacyOperations":
             succeed(request_id, legacy_operations())
         elif method == "appSettings":
-            succeed(request_id, app_settings_payload())
+            succeed(request_id, app_settings_payload(store))
         elif method == "saveAppSettings":
-            succeed(request_id, update_app_settings(params))
+            succeed(request_id, update_app_settings(store, params))
+        elif method == "appLogs":
+            succeed(request_id, app_logs(store))
+        elif method == "readAppLog":
+            succeed(request_id, read_app_log(store, params))
+        elif method == "exportAppLog":
+            succeed(request_id, export_app_log(store, params))
+        elif method == "appEnvironment":
+            succeed(request_id, app_environment(store))
         elif method == "saveAccount":
             succeed(request_id, save_account(store, params))
         elif method == "removeAccount":

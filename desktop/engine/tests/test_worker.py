@@ -250,6 +250,29 @@ def test_app_settings_roundtrip_uses_legacy_normalization(tmp_path, monkeypatch,
     assert loaded["options"]["stockCorrectionBatchSize"] == {"min": 1, "max": 500}
 
 
+def test_logs_and_environment_use_app_data_root(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))
+    store = app_store()
+    log_dir = tmp_path / "appdata" / "output" / "debug"
+    log_dir.mkdir(parents=True)
+    (log_dir / "sync_debug.log").write_text("first\nsecond\n", encoding="utf-8")
+
+    handle(store, _request("appLogs", request_id="logs"))
+    logs = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]["logs"]
+    sync_log = next(log for log in logs if log["id"] == "sync")
+    assert sync_log["exists"] is True
+    assert sync_log["path"].endswith("sync_debug.log")
+
+    handle(store, _request("readAppLog", {"id": "sync", "maxChars": 20}, "read-log"))
+    content = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]["content"]
+    assert content == "first\nsecond\n"
+
+    handle(store, _request("appEnvironment", request_id="environment"))
+    environment = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
+    assert environment["dataRoot"].endswith("appdata")
+    assert environment["legacyVersion"] == worker.LEGACY_APP_VERSION
+
+
 def test_inventory_reference_sync_reports_persisted_product_progress(tmp_path, monkeypatch, capfd):
     monkeypatch.setenv("TACOS_CREDENTIAL_BACKEND", "sqlite_plaintext")
     monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))
