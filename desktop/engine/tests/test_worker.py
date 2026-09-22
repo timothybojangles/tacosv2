@@ -393,6 +393,62 @@ def test_inventory_validation_returns_accepted_and_rejected_rows(tmp_path, monke
     assert full_report[-1]["sku"] == "BAD-SKU-104"
 
 
+def test_open_sales_validation_stages_orders_and_preview(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("TACOS_CREDENTIAL_BACKEND", "sqlite_plaintext")
+    monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))
+    store = app_store()
+    handle(store, _request(
+        "saveAccount",
+        {"accountName": "demo", "appRef": "app", "token": "secret", "region": "euw1"},
+        "save-1",
+    ))
+    capsys.readouterr()
+
+    db_path = worker.account_data_db(store, "demo")
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript("""
+            CREATE TABLE contact_catalogue (contactId INTEGER, primaryEmail TEXT, isCustomer INTEGER, isSupplier INTEGER);
+            INSERT INTO contact_catalogue VALUES (42, 'buyer@example.com', 1, 0);
+            CREATE TABLE product_catalogue (productId INTEGER, SKU TEXT);
+            INSERT INTO product_catalogue VALUES (101, 'SKU-1');
+            CREATE TABLE ref_warehouses (warehouseId INTEGER, name TEXT);
+            INSERT INTO ref_warehouses VALUES (1, 'Main');
+            CREATE TABLE ref_channels (channelId INTEGER, code TEXT, name TEXT);
+            INSERT INTO ref_channels VALUES (2, 'WEB', 'Web');
+            CREATE TABLE ref_price_lists (priceListId INTEGER, code TEXT, name TEXT);
+            INSERT INTO ref_price_lists VALUES (3, 'GBP', 'GBP Retail');
+            CREATE TABLE ref_currencies (isoCode TEXT);
+            INSERT INTO ref_currencies VALUES ('GBP');
+            CREATE TABLE ref_shipping_methods (shippingMethodId INTEGER, code TEXT, name TEXT);
+            INSERT INTO ref_shipping_methods VALUES (4, 'STD', 'Standard');
+            CREATE TABLE ref_payment_methods (code TEXT);
+            INSERT INTO ref_payment_methods VALUES ('CARD');
+            CREATE TABLE ref_order_statuses (statusId INTEGER, code TEXT, name TEXT, rawJson TEXT);
+            INSERT INTO ref_order_statuses VALUES (5, 'NEW', 'New', '{"orderTypeCode":"SO"}');
+        """)
+    source = tmp_path / "open-sales.csv"
+    source.write_text(
+        "\n".join([
+            "order_ref,placed_on,tax_date,delivery_date,customer_email,warehouse,channel,order_status,currency,price_list,exchange_rate,shipping_method,payment_amount,payment_date,payment_ref,payment_method_code,delivery_address_name,delivery_address_line1,delivery_address_line2,delivery_address_line3,delivery_address_line4,delivery_postcode,delivery_country,delivery_telephone,delivery_email,item_name,item_sku,item qty,item_tax_code,row_net,row_tax_amount",
+            "SO-1,01/09/2026,01/09/2026,02/09/2026,buyer@example.com,Main,WEB,NEW,GBP,GBP,1,STD,12.00,01/09/2026,PAY-1,CARD,Buyer,Line 1,,,,AB1 2CD,GB,,buyer@example.com,Widget,SKU-1,2,T20,10.00,2.00",
+        ]),
+        encoding="utf-8",
+    )
+
+    handle(store, _request("validateOpenSalesFile", {"accountName": "demo", "path": str(source)}, "sales-validate"))
+    result = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
+    assert result["orders"] == 1
+    assert result["rows"] == 1
+    assert result["preview"]["orders"] == 1
+    assert result["preview"]["payments"] == 1
+    assert result["preview"]["executionStatus"]["state"] == "checkpoint_required"
+
+    handle(store, _request("previewOpenSalesRun", {"accountName": "demo"}, "sales-preview"))
+    preview = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
+    assert preview["previewOrders"][0]["orderRef"] == "SO-1"
+    assert preview["referenceCounts"]["validatedOrders"] == 1
+
+
 def test_inventory_validation_uses_account_price_list_and_blank_option(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("TACOS_CREDENTIAL_BACKEND", "sqlite_plaintext")
     monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))

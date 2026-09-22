@@ -17,6 +17,7 @@ import {
   Lock,
   RefreshCw,
   Settings,
+  ShoppingCart,
   Trash2,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -63,6 +64,7 @@ type LegacyOperation = {
 const tabs = [
   { id: "accounts", label: "Accounts", icon: KeyRound },
   { id: "tasks", label: "Inventory", icon: FileSpreadsheet },
+  { id: "openSales", label: "Open Sales", icon: ShoppingCart },
   { id: "legacy", label: "Legacy Tools", icon: CheckCircle2 },
   { id: "data", label: "Data", icon: Database },
   { id: "history", label: "Job History", icon: History },
@@ -161,6 +163,9 @@ export default function App() {
   const [logPath, setLogPath] = useState("");
   const [logTruncated, setLogTruncated] = useState(false);
   const [environment, setEnvironment] = useState<any>(null);
+  const [openSalesPath, setOpenSalesPath] = useState("");
+  const [openSalesValidation, setOpenSalesValidation] = useState<any>(null);
+  const [openSalesPreview, setOpenSalesPreview] = useState<any>(null);
 
   const activeAccount = accounts.find((account) => account.accountName === activeAccountName) || null;
   const counts = activeAccount?.referenceCounts || emptyCounts();
@@ -200,6 +205,8 @@ export default function App() {
     setPriceListId("");
     setValidation(null);
     setRunPreview(null);
+    setOpenSalesValidation(null);
+    setOpenSalesPreview(null);
     setLiveConfirm("");
     setLiveProgress(null);
     setLiveBatches([]);
@@ -311,6 +318,40 @@ export default function App() {
       setValidation(null);
       setRunPreview(null);
     }
+  }
+
+  async function chooseOpenSalesSource() {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "Open Sales source", extensions: ["csv", "xlsx"] }],
+    });
+    if (typeof selected === "string") {
+      setOpenSalesPath(selected);
+      setOpenSalesValidation(null);
+      setOpenSalesPreview(null);
+    }
+  }
+
+  async function validateOpenSalesSource() {
+    if (!activeAccountName || !openSalesPath) return;
+    await run("validateOpenSales", async () => {
+      const result = await engine("validateOpenSalesFile", {
+        accountName: activeAccountName,
+        path: openSalesPath,
+      });
+      setOpenSalesValidation(result);
+      setOpenSalesPreview(result.preview);
+      setMessage(`Open Sales validation complete: ${result.orders} order(s), ${result.rows} row(s) staged.`);
+    });
+  }
+
+  async function refreshOpenSalesPreview() {
+    if (!activeAccountName) return;
+    await run("previewOpenSales", async () => {
+      const result = await engine("previewOpenSalesRun", { accountName: activeAccountName });
+      setOpenSalesPreview(result);
+      setMessage(`Open Sales preview loaded: ${result.orders} staged order(s).`);
+    });
   }
 
   async function validateSource() {
@@ -682,6 +723,12 @@ export default function App() {
                           Open inventory workflow
                         </button>
                       )}
+                      {operation.id === "open_sales" && (
+                        <button onClick={() => setActiveTab("openSales")}>
+                          <ShoppingCart size={18} />
+                          Open sales workflow
+                        </button>
+                      )}
                     </article>
                   ))}
                   {!legacyOperations.filter((operation) => operation.category === category).length && (
@@ -691,6 +738,94 @@ export default function App() {
               </div>
             ))}
             {!legacyOperations.length && <p className="empty">No legacy operations loaded.</p>}
+          </section>
+        )}
+
+        {activeTab === "openSales" && (
+          <section className="panel">
+            <div className="resultHeader">
+              <div>
+                <h2>Open Sales</h2>
+                <p>Validate legacy Open Sales files against synced account references and preview staged orders before live posting is added.</p>
+              </div>
+              <button onClick={refreshOpenSalesPreview} disabled={!!busy || !activeAccountName}>
+                {busy === "previewOpenSales" ? <Loader2 className="spin" size={18} /> : <FileSearch size={18} />}
+                Refresh preview
+              </button>
+            </div>
+            <div className="taskFlow openSalesFlow">
+              <section className="step stepAccount">
+                <div className="stepHeading"><span className="stepIndex">1</span><h2>Account</h2></div>
+                <p>{activeAccountName ? `Using ${activeAccountName}.` : "Choose an account first."}</p>
+              </section>
+              <section className="step stepSource">
+                <div className="stepHeading"><span className="stepIndex">2</span><h2>Source</h2></div>
+                <div className="sourceRow">
+                  <input value={openSalesPath} readOnly placeholder="Choose Open Sales CSV/XLSX" />
+                  <button onClick={chooseOpenSalesSource} disabled={!!busy}>
+                    <FolderOpen size={18} />
+                    Choose
+                  </button>
+                </div>
+              </section>
+              <section className="step stepValidate">
+                <div className="stepHeading"><span className="stepIndex">3</span><h2>Validate</h2></div>
+                <p>Checks customers, products, warehouses, channels, price lists, statuses, currencies, shipping and payments.</p>
+                <button onClick={validateOpenSalesSource} disabled={!!busy || !activeAccountName || !openSalesPath}>
+                  {busy === "validateOpenSales" ? <Loader2 className="spin" size={18} /> : <FileSearch size={18} />}
+                  Validate Open Sales
+                </button>
+              </section>
+              <section className="step stepRun">
+                <div className="stepHeading"><span className="stepIndex">4</span><h2>Live posting</h2></div>
+                <p>{openSalesPreview?.executionStatus?.message || "Live posting will appear only after checkpointed order and payment execution is implemented."}</p>
+              </section>
+            </div>
+            {openSalesValidation?.referenceCounts && (
+              <div className="counts wideCounts">
+                {Object.entries(openSalesValidation.referenceCounts).map(([key, value]) => (
+                  <span key={key}>{key}<strong>{String(value)}</strong></span>
+                ))}
+              </div>
+            )}
+            {openSalesPreview && (
+              <div className="runPreview">
+                <div className="resultHeader">
+                  <div>
+                    <h2>Staged Open Sales preview</h2>
+                    <p>{openSalesPreview.orders} order(s), {openSalesPreview.rows} row(s), {openSalesPreview.payments} payment(s), payment total {openSalesPreview.paymentTotal}.</p>
+                  </div>
+                  <span className="jobState state-running">Checkpoint required</span>
+                </div>
+                <div className="tableWrap compactTable">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Order ref</th><th>Rows</th><th>Contact</th><th>Placed</th><th>Currency</th><th>Net</th><th>Tax</th><th>Payment</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(openSalesPreview.previewOrders || []).map((order: any) => (
+                        <tr key={order.orderRef}>
+                          <td>{order.orderRef}</td>
+                          <td>{order.rows}</td>
+                          <td>{order.contactId}</td>
+                          <td>{order.placedOn}</td>
+                          <td>{order.currency}</td>
+                          <td>{order.netTotal}</td>
+                          <td>{order.taxTotal}</td>
+                          <td>{order.paymentAmount ?? ""}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {!(openSalesPreview.previewOrders || []).length && <p className="empty">No staged Open Sales orders yet.</p>}
+                </div>
+                {!!openSalesValidation?.logs?.length && (
+                  <pre>{openSalesValidation.logs.join("\n")}</pre>
+                )}
+              </div>
+            )}
           </section>
         )}
 

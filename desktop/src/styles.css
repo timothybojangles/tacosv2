@@ -254,6 +254,12 @@ h2 {
   min-width: 0;
 }
 
+.openSalesFlow {
+  grid-template-areas:
+    "account source source"
+    "validate validate run";
+}
+
 .syncProgress {
   display: grid;
   gap: 5px;
@@ -521,7 +527,8 @@ select {
 }
 
 .sourceRow button,
-.toolbar button {
+.toolbar button,
+.stepValidate button {
   background: var(--accent);
   color: white;
 }
@@ -541,6 +548,7 @@ button:disabled {
 }
 
 .stepRun button,
+.stepValidate button,
 .runPreview button {
   display: inline-flex;
   align-items: center;
@@ -552,6 +560,14 @@ button:disabled {
   background: var(--accent);
   color: white;
   cursor: pointer;
+}
+
+.wideCounts {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.compactTable {
+  min-height: 180px;
 }
 
 .runPreview {

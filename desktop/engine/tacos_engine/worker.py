@@ -42,6 +42,11 @@ from brightpearl.settings import AppSettings, get_settings, normalize_settings, 
 from brightpearl.warehouse_locations import update_location_catalogue
 from reference_data import fetch_and_store_reference_tables
 from validator import validate_and_enrich_inventory
+from validator_sales_orders import (
+    ORDERS_TABLE as SALES_ORDERS_TABLE,
+    ROWS_TABLE as SALES_ROWS_TABLE,
+    validate_sales_orders,
+)
 
 PROTOCOL_VERSION = 1
 MAX_MESSAGE_BYTES = 64 * 1024
@@ -441,6 +446,30 @@ def reference_counts(db_path: Path) -> dict[str, int]:
         "priceLists": "ref_price_lists",
         "priceListValues": "ref_price_list_values",
         "validatedInventory": "validated_inventory",
+    }
+    result = {key: 0 for key in tables}
+    with sqlite3.connect(db_path) as conn:
+        for key, table in tables.items():
+            try:
+                result[key] = int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+            except sqlite3.OperationalError:
+                result[key] = 0
+    return result
+
+
+def sales_reference_counts(db_path: Path) -> dict[str, int]:
+    tables = {
+        "customers": "contact_catalogue",
+        "products": "product_catalogue",
+        "warehouses": "ref_warehouses",
+        "channels": "ref_channels",
+        "priceLists": "ref_price_lists",
+        "currencies": "ref_currencies",
+        "shippingMethods": "ref_shipping_methods",
+        "paymentMethods": "ref_payment_methods",
+        "orderStatuses": "ref_order_statuses",
+        "validatedOrders": SALES_ORDERS_TABLE,
+        "validatedRows": SALES_ROWS_TABLE,
     }
     result = {key: 0 for key in tables}
     with sqlite3.connect(db_path) as conn:
@@ -947,6 +976,140 @@ def validate_inventory_file(store: Store, request_id: str, params: dict[str, Any
         "exceptionReportPath": str(report_path) if rejected else None,
         "exceptionReportFileName": report_path.name if rejected else None,
     }
+
+
+def open_sales_preview(db_path: Path, limit: int = 25) -> dict[str, Any]:
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            totals = conn.execute(
+                f"""
+                SELECT
+                    COUNT(*) AS orders,
+                    COALESCE(SUM(CASE WHEN payment_amount IS NOT NULL THEN 1 ELSE 0 END), 0) AS payments,
+                    COALESCE(SUM(payment_amount), 0) AS paymentTotal
+                FROM {SALES_ORDERS_TABLE}
+                """
+            ).fetchone()
+            row_count = int(conn.execute(f"SELECT COUNT(*) FROM {SALES_ROWS_TABLE}").fetchone()[0])
+            orders = [dict(row) for row in conn.execute(
+                f"""
+                SELECT
+                    o.order_ref AS orderRef,
+                    o.contactId,
+                    o.placed_on AS placedOn,
+                    o.warehouseId,
+                    o.channelId,
+                    o.statusId,
+                    o.currency,
+                    o.priceListId,
+                    o.payment_amount AS paymentAmount,
+                    o.payment_method_code AS paymentMethodCode,
+                    COUNT(r.id) AS rows,
+                    COALESCE(SUM(r.row_net), 0) AS netTotal,
+                    COALESCE(SUM(r.row_tax_amount), 0) AS taxTotal
+                FROM {SALES_ORDERS_TABLE} o
+                LEFT JOIN {SALES_ROWS_TABLE} r ON r.order_ref = o.order_ref
+                GROUP BY o.id
+                ORDER BY o.id
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()]
+            lines = [dict(row) for row in conn.execute(
+                f"""
+                SELECT order_ref AS orderRef, line_number AS lineNumber, item_sku AS sku,
+                    item_name AS itemName, item_qty AS quantity, row_net AS net, row_tax_amount AS tax,
+                    productId, rowType
+                FROM {SALES_ROWS_TABLE}
+                ORDER BY order_ref, line_number
+                LIMIT ?
+                """,
+                (limit * 4,),
+            ).fetchall()]
+        return {
+            "orders": int(totals["orders"] or 0) if totals else 0,
+            "rows": row_count,
+            "payments": int(totals["payments"] or 0) if totals else 0,
+            "paymentTotal": float(totals["paymentTotal"] or 0) if totals else 0.0,
+            "previewOrders": orders,
+            "previewRows": lines,
+            "executionStatus": {
+                "state": "checkpoint_required",
+                "message": "Live Open Sales posting is intentionally disabled until checkpointed order and payment writes are implemented.",
+            },
+        }
+    except sqlite3.OperationalError:
+        return {
+            "orders": 0,
+            "rows": 0,
+            "payments": 0,
+            "paymentTotal": 0.0,
+            "previewOrders": [],
+            "previewRows": [],
+            "executionStatus": {
+                "state": "not_validated",
+                "message": "Validate an Open Sales file before previewing staged orders.",
+            },
+        }
+
+
+def validate_open_sales_file(store: Store, request_id: str, params: dict[str, Any]) -> dict[str, Any]:
+    account_name = normalize_account_name(params.get("accountName"))
+    account_meta = account_summary_without_secret(store, account_name)
+    path = Path(str(params.get("path", ""))).expanduser()
+    if not path.exists() or not path.is_file():
+        raise WorkerError("source_missing", "Choose an existing local CSV or XLSX file.")
+    if path.suffix.lower() not in {".csv", ".xlsx"}:
+        raise WorkerError("unsupported_source", "Open Sales accepts CSV or XLSX files.")
+    db_path = account_data_db(store, account_name)
+    credentials = read_credential(account_name)
+    if credentials:
+        prepare_legacy_credentials(store, account_name, credentials, account_meta.get("baseCurrency"))
+    update_job(store, request_id, kind="open_sales_validation", state="running", source_path=str(path), dataset_id=account_name)
+    logs: list[str] = []
+
+    def worker_log(message: str) -> None:
+        logs.append(str(message))
+        if len(logs) > 100:
+            del logs[: len(logs) - 100]
+
+    with legacy_operation(store):
+        orders, rows = validate_sales_orders(str(path), str(db_path), account_name, log_callback=worker_log)
+
+    preview = open_sales_preview(db_path)
+    references = sales_reference_counts(db_path)
+    update_job(
+        store,
+        request_id,
+        kind="open_sales_validation",
+        state="succeeded" if orders > 0 else "succeeded_with_warnings",
+        message=f"Validated {orders} order(s) and {rows} row(s). Live posting awaits checkpointed execution.",
+    )
+    return {
+        "validationJobId": request_id,
+        "orders": orders,
+        "rows": rows,
+        "referenceCounts": references,
+        "logs": logs,
+        "preview": preview,
+    }
+
+
+def preview_open_sales_run(store: Store, request_id: str, params: dict[str, Any]) -> dict[str, Any]:
+    account_name = normalize_account_name(params.get("accountName"))
+    account_summary_without_secret(store, account_name)
+    db_path = account_data_db(store, account_name)
+    preview = open_sales_preview(db_path)
+    update_job(
+        store,
+        request_id,
+        kind="open_sales_preview",
+        state="succeeded" if preview["orders"] else "succeeded_with_warnings",
+        dataset_id=account_name,
+        message=f"Previewed {preview['orders']} staged Open Sales order(s).",
+    )
+    return {"accountName": account_name, **preview, "referenceCounts": sales_reference_counts(db_path)}
 
 
 def current_inventory_validation(store: Store, account_name: str, validation_id: str) -> tuple[str, Path, int]:
@@ -1723,6 +1886,10 @@ def handle(store: Store, request: dict[str, Any]) -> None:
             succeed(request_id, sync_inventory_references(store, request_id, params))
         elif method == "validateInventoryFile":
             succeed(request_id, validate_inventory_file(store, request_id, params))
+        elif method == "validateOpenSalesFile":
+            succeed(request_id, validate_open_sales_file(store, request_id, params))
+        elif method == "previewOpenSalesRun":
+            succeed(request_id, preview_open_sales_run(store, request_id, params))
         elif method == "inventoryPriceLists":
             succeed(request_id, inventory_price_lists(store, params))
         elif method == "previewInventoryRun":
