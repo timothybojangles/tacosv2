@@ -210,8 +210,6 @@ def test_unmatched_inventory_sku_is_not_hidden_by_blank_price_option(tmp_path, i
     assert rejected["validation_categories"] == "unmatched_sku"
 
 
-@pytest.mark.legacy_gap
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="SO-001: retry after payment failure recreates confirmed order")
 def test_saved_order_id_prevents_second_order_creation():
     order = dict(id=1, order_ref="TEST-ORDER", orderId=123, payment_amount="10",
                  payment_method_code="TEST", payment_date="2026-01-01")

@@ -441,12 +441,78 @@ def test_open_sales_validation_stages_orders_and_preview(tmp_path, monkeypatch, 
     assert result["rows"] == 1
     assert result["preview"]["orders"] == 1
     assert result["preview"]["payments"] == 1
-    assert result["preview"]["executionStatus"]["state"] == "checkpoint_required"
+    assert result["preview"]["executionStatus"]["state"] == "checkpointed"
 
     handle(store, _request("previewOpenSalesRun", {"accountName": "demo"}, "sales-preview"))
     preview = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
     assert preview["previewOrders"][0]["orderRef"] == "SO-1"
     assert preview["referenceCounts"]["validatedOrders"] == 1
+
+
+def test_open_sales_live_retry_reuses_saved_order_id(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("TACOS_CREDENTIAL_BACKEND", "sqlite_plaintext")
+    monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))
+    store = app_store()
+    handle(store, _request(
+        "saveAccount",
+        {"accountName": "demo", "appRef": "app", "token": "secret", "region": "euw1"},
+        "save-1",
+    ))
+    capsys.readouterr()
+    db_path = worker.account_data_db(store, "demo")
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript("""
+            CREATE TABLE validated_sales_orders (
+                id INTEGER PRIMARY KEY, order_ref TEXT, contactId INTEGER, placed_on TEXT, tax_date TEXT,
+                delivery_date TEXT, warehouseId INTEGER, channelId INTEGER, statusId INTEGER, currency TEXT,
+                priceListId INTEGER, exchangeRate REAL, shippingMethodId INTEGER, payment_amount REAL,
+                payment_date TEXT, payment_ref TEXT, payment_method_code TEXT, orderId INTEGER,
+                delivery_name TEXT, delivery_line1 TEXT, delivery_line2 TEXT, delivery_line3 TEXT,
+                delivery_line4 TEXT, delivery_postcode TEXT, delivery_country TEXT, delivery_countryIsoCode TEXT,
+                delivery_telephone TEXT, delivery_email TEXT, source_csv_headers TEXT, source_csv_filename TEXT
+            );
+            INSERT INTO validated_sales_orders VALUES (
+                1, 'SO-RETRY', 42, '2026-09-01', '2026-09-01', '2026-09-02', 1, 2, 5, 'GBP',
+                3, 1, 4, 12.00, '2026-09-01', 'PAY-1', 'CARD', NULL,
+                'Buyer', 'Line 1', NULL, NULL, NULL, 'AB1 2CD', 'GB', 'GB', NULL,
+                'buyer@example.com', '[]', 'source.csv'
+            );
+            CREATE TABLE validated_sales_order_rows (
+                id INTEGER PRIMARY KEY, order_ref TEXT, line_number INTEGER, item_name TEXT, item_sku TEXT,
+                item_qty REAL, item_tax_code TEXT, row_net REAL, row_tax_amount REAL, productId INTEGER,
+                rowType TEXT, original_row_json TEXT
+            );
+            INSERT INTO validated_sales_order_rows VALUES (
+                1, 'SO-RETRY', 1, 'Widget', 'SKU-1', 2, 'T20', 10, 2, 101,
+                'PRODUCT', '{"order_ref":"SO-RETRY"}'
+            );
+        """)
+
+    with (
+        patch.object(worker, "post_sales_order", return_value=(True, 999)) as create_order,
+        patch.object(worker, "post_sales_payment", return_value=(False, None)),
+    ):
+        handle(store, _request("runOpenSalesOrder", {
+            "accountName": "demo", "confirmAccountName": "demo"
+        }, "sales-live-1"))
+    failed = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert failed["error"]["code"] == "write_uncertain"
+    create_order.assert_called_once()
+
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT orderId FROM validated_sales_orders").fetchone()[0] == 999
+
+    with (
+        patch.object(worker, "post_sales_order") as create_order_again,
+        patch.object(worker, "post_sales_payment", return_value=(True, {"response": 1})),
+    ):
+        handle(store, _request("runOpenSalesOrder", {
+            "accountName": "demo", "confirmAccountName": "demo"
+        }, "sales-live-2"))
+    result = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
+    create_order_again.assert_not_called()
+    assert result["orderId"] == 999
+    assert result["paymentState"] == "succeeded"
 
 
 def test_open_sales_template_and_reference_sync_parity(tmp_path, monkeypatch, capsys):

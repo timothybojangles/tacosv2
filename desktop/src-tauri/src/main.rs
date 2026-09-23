@@ -131,6 +131,8 @@ fn validate_request(request: &Value) -> Result<(), String> {
         | "previewOpenSalesRun"
         | "saveOpenSalesTemplate"
         | "syncOpenSalesReferences"
+        | "runOpenSalesOrder"
+        | "openSalesLiveStatus"
         | "saveInventoryExceptionReport"
         | "jobHistory"
         | "cancel"

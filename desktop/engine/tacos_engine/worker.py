@@ -50,6 +50,14 @@ from validator_sales_orders import (
     TEMPLATE_HEADERS as SALES_TEMPLATE_HEADERS,
     validate_sales_orders,
 )
+from sync_sales_orders import (
+    build_bp_order_payload as build_sales_order_payload,
+    build_bp_payment_payload as build_sales_payment_payload,
+    load_validated_orders as load_validated_sales_orders,
+    post_order as post_sales_order,
+    post_payment as post_sales_payment,
+    update_order_id as update_sales_order_id,
+)
 
 PROTOCOL_VERSION = 1
 MAX_MESSAGE_BYTES = 64 * 1024
@@ -80,7 +88,7 @@ LEGACY_OPERATIONS: list[dict[str, Any]] = [
         "label": "Open Sales",
         "category": "Go Live",
         "legacyView": "open_sales",
-        "status": "foundation",
+        "status": "active",
         "legacyModules": ["validator_sales_orders.py", "sync_sales_orders.py"],
         "apiFamilies": ["Order POST", "Sales order rows", "Sales payments"],
         "workflow": ["Validate order groups", "Create sales orders", "Add rows", "Checkpoint payments"],
@@ -1038,8 +1046,8 @@ def open_sales_preview(db_path: Path, limit: int = 25) -> dict[str, Any]:
             "previewOrders": orders,
             "previewRows": lines,
             "executionStatus": {
-                "state": "checkpoint_required",
-                "message": "Live Open Sales posting is intentionally disabled until checkpointed order and payment writes are implemented.",
+                "state": "checkpointed",
+                "message": "Live Open Sales posting uses checkpoints: saved order ids are reused and payment failures do not recreate orders.",
             },
         }
     except sqlite3.OperationalError:
@@ -1087,7 +1095,7 @@ def validate_open_sales_file(store: Store, request_id: str, params: dict[str, An
         request_id,
         kind="open_sales_validation",
         state="succeeded" if orders > 0 else "succeeded_with_warnings",
-        message=f"Validated {orders} order(s) and {rows} row(s). Live posting awaits checkpointed execution.",
+        message=f"Validated {orders} order(s) and {rows} row(s). Checkpointed live posting is available.",
     )
     return {
         "validationJobId": request_id,
@@ -1168,6 +1176,155 @@ def sync_open_sales_references(store: Store, request_id: str, params: dict[str, 
         message="Open Sales reference sync complete.",
     )
     return {"accountName": account_name, "mode": mode, "results": results, "referenceCounts": sales_reference_counts(db_path), "logs": logs}
+
+
+def ensure_open_sales_live_tables(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS open_sales_live_orders (
+            order_ref TEXT PRIMARY KEY,
+            order_id INTEGER,
+            state TEXT NOT NULL,
+            payment_state TEXT,
+            error TEXT,
+            updated_at REAL NOT NULL
+        )
+        """
+    )
+
+
+def open_sales_live_status(store: Store, params: dict[str, Any]) -> dict[str, Any]:
+    account_name = normalize_account_name(params.get("accountName"))
+    db_path = account_data_db(store, account_name)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        ensure_open_sales_live_tables(conn)
+        rows = conn.execute(
+            "SELECT order_ref, order_id, state, payment_state, error, updated_at "
+            "FROM open_sales_live_orders ORDER BY updated_at DESC LIMIT 100"
+        ).fetchall()
+        try:
+            remaining = int(conn.execute(
+                f"SELECT COUNT(*) FROM {SALES_ORDERS_TABLE} WHERE {unprocessed_where_clause()}"
+            ).fetchone()[0])
+        except sqlite3.OperationalError:
+            remaining = 0
+    return {"orders": [dict(row) for row in rows], "remaining": remaining}
+
+
+def run_open_sales_order(store: Store, request_id: str, params: dict[str, Any]) -> dict[str, Any]:
+    account_name = normalize_account_name(params.get("accountName"))
+    confirm = normalize_account_name(params.get("confirmAccountName"))
+    if confirm != account_name:
+        raise WorkerError("confirmation_required", "Type the account name exactly before sending Open Sales orders.")
+    credentials = credentials_for_account(store, account_name)
+    db_path = account_data_db(store, account_name)
+    prepare_legacy_credentials(store, account_name, credentials, account_summary_without_secret(store, account_name).get("baseCurrency"))
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        ensure_open_sales_live_tables(conn)
+        uncertain = conn.execute(
+            "SELECT order_ref FROM open_sales_live_orders WHERE state = 'unknown' LIMIT 1"
+        ).fetchone()
+        if uncertain:
+            raise WorkerError("reconciliation_required", f"Order {uncertain['order_ref']} has an uncertain outcome. Reconcile it in Brightpearl before continuing.")
+
+    with legacy_operation(store):
+        orders = load_validated_sales_orders(str(db_path))
+    total = len(orders)
+    if total == 0:
+        return {"done": True, "completed": 0, "remaining": 0, "total": 0, "waitMs": 0}
+    order = orders[0]
+    order_ref = str(order["order_ref"])
+
+    update_job(store, request_id, kind="open_sales_live_order", state="running", dataset_id=account_name,
+               message=f"Sending Open Sales order {order_ref}.")
+    order_url = (
+        f"https://{credentials.region}.brightpearlconnect.com/public-api/{account_name}/"
+        "order-service/sales-order"
+    )
+    payment_url = (
+        f"https://{credentials.region}.brightpearlconnect.com/public-api/{account_name}/"
+        "accounting-service/customer-payment"
+    )
+    headers = {**credentials.headers, "Content-Type": "application/json"}
+    order_id = order.get("orderId")
+
+    with sqlite3.connect(db_path) as conn:
+        ensure_open_sales_live_tables(conn)
+        conn.execute(
+            "INSERT INTO open_sales_live_orders (order_ref, order_id, state, payment_state, error, updated_at) "
+            "VALUES (?, ?, 'running', NULL, NULL, ?) "
+            "ON CONFLICT(order_ref) DO UPDATE SET state = 'running', error = NULL, updated_at = excluded.updated_at",
+            (order_ref, order_id, time.time()),
+        )
+
+    if not order_id:
+        payload = build_sales_order_payload(order)
+        ok, created_id = post_sales_order(order_url, headers, payload)
+        if not ok or not created_id:
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    "UPDATE open_sales_live_orders SET state = 'unknown', error = ?, updated_at = ? WHERE order_ref = ?",
+                    ("Order creation was not confirmed by Brightpearl.", time.time(), order_ref),
+                )
+            raise WorkerError("write_uncertain", f"Order {order_ref}: Brightpearl order creation was not confirmed. Reconcile before retrying.")
+        order_id = int(created_id)
+        update_sales_order_id(str(db_path), order_ref, order_id)
+        order["orderId"] = order_id
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE open_sales_live_orders SET order_id = ?, state = 'order_created', updated_at = ? WHERE order_ref = ?",
+                (order_id, time.time(), order_ref),
+            )
+
+    payment_required = False
+    try:
+        payment_required = float(order.get("payment_amount") or 0) > 0
+    except (TypeError, ValueError):
+        payment_required = False
+    if payment_required and order.get("payment_method_code") and order.get("payment_date"):
+        payment_payload = build_sales_payment_payload(order_id, order)
+        ok, _ = post_sales_payment(payment_url, headers, payment_payload)
+        if not ok:
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    "UPDATE open_sales_live_orders SET state = 'payment_failed', payment_state = 'failed', error = ?, updated_at = ? WHERE order_ref = ?",
+                    ("Payment failed. The order id is saved; retry will reuse it.", time.time(), order_ref),
+                )
+            raise WorkerError("write_uncertain", f"Order {order_ref}: payment failed. The order id {order_id} is saved; retry will not recreate the order.")
+        payment_state = "succeeded"
+    elif payment_required:
+        payment_state = "skipped_missing_details"
+    else:
+        payment_state = "not_required"
+
+    with sqlite3.connect(db_path) as conn:
+        marked = mark_rows_processed(conn, SALES_ORDERS_TABLE, order["id"], f"Created sales order {order_id}")
+        if marked != 1:
+            conn.execute(
+                "UPDATE open_sales_live_orders SET state = 'unknown', error = ?, updated_at = ? WHERE order_ref = ?",
+                ("Brightpearl accepted the order but local completion failed.", time.time(), order_ref),
+            )
+            raise WorkerError("reconciliation_required", f"Order {order_ref}: Brightpearl accepted the order but local completion failed.")
+        conn.execute(
+            "UPDATE open_sales_live_orders SET state = 'succeeded', payment_state = ?, error = NULL, updated_at = ? WHERE order_ref = ?",
+            (payment_state, time.time(), order_ref),
+        )
+    remaining = max(0, total - 1)
+    update_job(store, request_id, kind="open_sales_live_order", state="succeeded", dataset_id=account_name,
+               message=f"Open Sales order {order_ref} confirmed as Brightpearl order {order_id}.")
+    return {
+        "done": remaining == 0,
+        "completed": 1,
+        "remaining": remaining,
+        "total": total,
+        "orderRef": order_ref,
+        "orderId": order_id,
+        "paymentState": payment_state,
+        "waitMs": 500,
+    }
 
 
 def current_inventory_validation(store: Store, account_name: str, validation_id: str) -> tuple[str, Path, int]:
@@ -1952,6 +2109,10 @@ def handle(store: Store, request: dict[str, Any]) -> None:
             succeed(request_id, save_open_sales_template(store, params))
         elif method == "syncOpenSalesReferences":
             succeed(request_id, sync_open_sales_references(store, request_id, params))
+        elif method == "runOpenSalesOrder":
+            succeed(request_id, run_open_sales_order(store, request_id, params))
+        elif method == "openSalesLiveStatus":
+            succeed(request_id, open_sales_live_status(store, params))
         elif method == "inventoryPriceLists":
             succeed(request_id, inventory_price_lists(store, params))
         elif method == "previewInventoryRun":

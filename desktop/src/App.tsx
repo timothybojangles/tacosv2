@@ -166,6 +166,8 @@ export default function App() {
   const [openSalesPath, setOpenSalesPath] = useState("");
   const [openSalesValidation, setOpenSalesValidation] = useState<any>(null);
   const [openSalesPreview, setOpenSalesPreview] = useState<any>(null);
+  const [openSalesConfirm, setOpenSalesConfirm] = useState("");
+  const [openSalesLiveStatus, setOpenSalesLiveStatus] = useState<any>(null);
 
   const activeAccount = accounts.find((account) => account.accountName === activeAccountName) || null;
   const counts = activeAccount?.referenceCounts || emptyCounts();
@@ -207,6 +209,8 @@ export default function App() {
     setRunPreview(null);
     setOpenSalesValidation(null);
     setOpenSalesPreview(null);
+    setOpenSalesConfirm("");
+    setOpenSalesLiveStatus(null);
     setLiveConfirm("");
     setLiveProgress(null);
     setLiveBatches([]);
@@ -234,6 +238,9 @@ export default function App() {
         }
       })
       .catch((err) => { if (current) setError(`Could not restore live run: ${errorMessage(err)}`); });
+    void engine("openSalesLiveStatus", { accountName: activeAccountName })
+      .then((result) => { if (current) setOpenSalesLiveStatus(result); })
+      .catch(() => { if (current) setOpenSalesLiveStatus(null); });
     return () => { current = false; };
   }, [activeAccountName]);
 
@@ -373,6 +380,24 @@ export default function App() {
       const result = await engine("previewOpenSalesRun", { accountName: activeAccountName });
       setOpenSalesPreview(result);
       setMessage(`Open Sales preview loaded: ${result.orders} staged order(s).`);
+    });
+  }
+
+  async function runOpenSalesLive() {
+    if (!activeAccountName || openSalesConfirm !== activeAccountName) return;
+    const accountName = activeAccountName;
+    await run("runOpenSales", async () => {
+      for (;;) {
+        const result = await engine("runOpenSalesOrder", {
+          accountName,
+          confirmAccountName: openSalesConfirm,
+        });
+        const status = await engine("openSalesLiveStatus", { accountName });
+        setOpenSalesLiveStatus(status);
+        setMessage(`Open Sales order ${result.orderRef} confirmed as Brightpearl order ${result.orderId}.`);
+        if (result.done) break;
+        await new Promise((resolve) => setTimeout(resolve, result.waitMs || 500));
+      }
     });
   }
 
@@ -816,7 +841,12 @@ export default function App() {
               </section>
               <section className="step stepRun">
                 <div className="stepHeading"><span className="stepIndex">5</span><h2>Sync to Brightpearl</h2></div>
-                <p>{openSalesPreview?.executionStatus?.message || "Live posting will appear only after checkpointed order and payment execution is implemented."}</p>
+                <p>Creates one order at a time, saves the Brightpearl order id before payment, and stops for reconciliation if the outcome is uncertain.</p>
+                <input aria-label="Confirm account name for Open Sales sync" placeholder="Type account name" value={openSalesConfirm} disabled={!!busy} onChange={(event) => setOpenSalesConfirm(event.target.value)} />
+                <button onClick={runOpenSalesLive} disabled={!!busy || !openSalesPreview?.orders || openSalesConfirm !== activeAccountName}>
+                  {busy === "runOpenSales" ? <Loader2 className="spin" size={18} /> : <CheckCircle2 size={18} />}
+                  Sync Sales Orders
+                </button>
               </section>
             </div>
             {openSalesValidation?.referenceCounts && (
@@ -861,6 +891,19 @@ export default function App() {
                 </div>
                 {!!openSalesValidation?.logs?.length && (
                   <pre>{openSalesValidation.logs.join("\n")}</pre>
+                )}
+                {openSalesLiveStatus?.orders?.length > 0 && (
+                  <div className="liveBatchStatus">
+                    <strong>Recent Open Sales checkpoints</strong>
+                    {openSalesLiveStatus.orders.slice(0, 10).map((order: any) => (
+                      <div key={`${order.order_ref}-${order.updated_at}`}>
+                        {order.order_ref}: {order.state}
+                        {order.order_id ? `, order ${order.order_id}` : ""}
+                        {order.payment_state ? `, payment ${order.payment_state}` : ""}
+                        {order.error ? `, ${order.error}` : ""}
+                      </div>
+                    ))}
+                  </div>
                 )}
               </div>
             )}

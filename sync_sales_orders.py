@@ -420,28 +420,33 @@ def main(
         if cancel_token and cancel_token.is_set():
             _log("🛑 Cancel requested before processing next order.")
             break
-        # 1) Create order
-        order_payload = build_bp_order_payload(order)
-        ok, created_id = post_order(
-            ORDER_CREATE_URL,
-            headers,
-            order_payload,
-            cancel_token=cancel_token,
-        )
-        if cancel_token and cancel_token.is_set():
-            _log("🛑 Cancel detected after order attempt; stopping.")
-            break
-        if not ok or not created_id:
-            failed_orders.append(order)
-            done += 1
-            update_progress(done, total)
-            continue
+        created_id = order.get("orderId")
+        if created_id:
+            _log(f"↪️ Reusing saved Brightpearl orderId {created_id} for {order['order_ref']}.")
+        else:
+            # 1) Create order
+            order_payload = build_bp_order_payload(order)
+            ok, created_id = post_order(
+                ORDER_CREATE_URL,
+                headers,
+                order_payload,
+                cancel_token=cancel_token,
+            )
+            if cancel_token and cancel_token.is_set():
+                _log("🛑 Cancel detected after order attempt; stopping.")
+                break
+            if not ok or not created_id:
+                failed_orders.append(order)
+                done += 1
+                update_progress(done, total)
+                continue
 
-        # store orderId for future reference
-        try:
-            update_order_id(db_path, order["order_ref"], created_id)
-        except Exception as e:
-            _log(f"⚠️ Failed to update orderId in DB for {order['order_ref']}: {e}")
+            # store orderId for future reference before any later step can fail
+            try:
+                update_order_id(db_path, order["order_ref"], created_id)
+                order["orderId"] = created_id
+            except Exception as e:
+                _log(f"⚠️ Failed to update orderId in DB for {order['order_ref']}: {e}")
 
         # 2) Conditionally post payment
         try:
