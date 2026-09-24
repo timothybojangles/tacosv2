@@ -262,6 +262,15 @@ cancelled: set[str] = set()
 cancel_lock = threading.Lock()
 
 
+class RequestCancelToken:
+    def __init__(self, request_id: str):
+        self.request_id = request_id
+
+    def is_set(self) -> bool:
+        with cancel_lock:
+            return self.request_id in cancelled
+
+
 def app_store() -> Store:
     configured = os.environ.get("TACOS_DESKTOP_DATA_DIR")
     if configured:
@@ -1081,6 +1090,7 @@ def open_sales_preview(db_path: Path, limit: int = 25) -> dict[str, Any]:
 
 def validate_open_sales_file(store: Store, request_id: str, params: dict[str, Any]) -> dict[str, Any]:
     account_name = normalize_account_name(params.get("accountName"))
+    check_cancel(request_id)
     account_meta = account_summary_without_secret(store, account_name)
     path = Path(str(params.get("path", ""))).expanduser()
     if not path.exists() or not path.is_file():
@@ -1102,6 +1112,7 @@ def validate_open_sales_file(store: Store, request_id: str, params: dict[str, An
 
     with legacy_operation(store):
         orders, rows = validate_sales_orders(str(path), str(db_path), account_name, log_callback=worker_log)
+    check_cancel(request_id)
 
     preview = open_sales_preview(db_path)
     references = sales_reference_counts(db_path)
@@ -1177,6 +1188,7 @@ def write_open_sales_failed_csv(store: Store, account_name: str, order: dict[str
 
 def sync_open_sales_references(store: Store, request_id: str, params: dict[str, Any]) -> dict[str, Any]:
     account_name = normalize_account_name(params.get("accountName"))
+    cancel_token = RequestCancelToken(request_id)
     mode = str(params.get("mode") or "all").strip()
     if mode not in {"all", "reference", "contacts", "products"}:
         raise WorkerError("invalid_options", "Choose all, reference, contacts or products for Open Sales sync.")
@@ -1205,6 +1217,7 @@ def sync_open_sales_references(store: Store, request_id: str, params: dict[str, 
     results: dict[str, Any] = {}
     with legacy_operation(store):
         if mode in {"all", "reference"}:
+            check_cancel(request_id)
             emit_event(request_id, "progress", {"operation": "open_sales_reference_sync", "percent": 10, "message": "Syncing Open Sales reference data."})
             results["reference"] = fetch_and_store_reference_tables(
                 account_name,
@@ -1212,13 +1225,17 @@ def sync_open_sales_references(store: Store, request_id: str, params: dict[str, 
                 credentials.headers,
                 str(db_path),
                 log_callback=worker_log,
+                cancel_token=cancel_token,
             )
         if mode in {"all", "contacts"}:
+            check_cancel(request_id)
             emit_event(request_id, "progress", {"operation": "open_sales_reference_sync", "percent": 34, "message": "Syncing contact references."})
-            results["contacts"] = update_contact_catalogue(account_name, str(db_path), log_callback=worker_log)
+            results["contacts"] = update_contact_catalogue(account_name, str(db_path), log_callback=worker_log, cancel_token=cancel_token)
         if mode in {"all", "products"}:
+            check_cancel(request_id)
             emit_event(request_id, "progress", {"operation": "open_sales_reference_sync", "percent": 67, "message": "Syncing product references."})
-            results["products"] = update_product_catalogue(account_name, str(db_path), log_callback=worker_log)
+            results["products"] = update_product_catalogue(account_name, str(db_path), log_callback=worker_log, cancel_token=cancel_token)
+    check_cancel(request_id)
 
     emit_event(request_id, "progress", {"operation": "open_sales_reference_sync", "percent": 100, "message": "Open Sales reference sync complete."})
     update_job(
@@ -1273,6 +1290,7 @@ def open_sales_live_status(store: Store, params: dict[str, Any]) -> dict[str, An
 
 def run_open_sales_order(store: Store, request_id: str, params: dict[str, Any]) -> dict[str, Any]:
     account_name = normalize_account_name(params.get("accountName"))
+    cancel_token = RequestCancelToken(request_id)
     confirm = normalize_account_name(params.get("confirmAccountName"))
     if confirm != account_name:
         raise WorkerError("confirmation_required", "Type the account name exactly before sending Open Sales orders.")
@@ -1291,6 +1309,7 @@ def run_open_sales_order(store: Store, request_id: str, params: dict[str, Any]) 
 
     with legacy_operation(store):
         orders = load_validated_sales_orders(str(db_path))
+    check_cancel(request_id)
     total = len(orders)
     if total == 0:
         return {"done": True, "completed": 0, "remaining": 0, "total": 0, "waitMs": 0}
@@ -1329,7 +1348,7 @@ def run_open_sales_order(store: Store, request_id: str, params: dict[str, Any]) 
     if not order_id:
         payload = build_sales_order_payload(order)
         with legacy_operation(store):
-            ok, created_id = post_sales_order(order_url, headers, payload)
+            ok, created_id = post_sales_order(order_url, headers, payload, cancel_token=cancel_token)
         if not ok or not created_id:
             report_path = write_open_sales_failed_csv(store, account_name, order, "failed_sales_orders")
             with sqlite3.connect(db_path) as conn:
@@ -1346,6 +1365,7 @@ def run_open_sales_order(store: Store, request_id: str, params: dict[str, Any]) 
                 "UPDATE open_sales_live_orders SET order_id = ?, state = 'order_created', updated_at = ? WHERE order_ref = ?",
                 (order_id, time.time(), order_ref),
             )
+        check_cancel(request_id)
 
     payment_required = False
     try:
@@ -1355,7 +1375,7 @@ def run_open_sales_order(store: Store, request_id: str, params: dict[str, Any]) 
     if payment_required and order.get("payment_method_code") and order.get("payment_date"):
         payment_payload = build_sales_payment_payload(order_id, order)
         with legacy_operation(store):
-            ok, _ = post_sales_payment(payment_url, headers, payment_payload)
+            ok, _ = post_sales_payment(payment_url, headers, payment_payload, cancel_token=cancel_token)
         if not ok:
             report_path = write_open_sales_failed_csv(store, account_name, order, "failed_sales_order_payments")
             with sqlite3.connect(db_path) as conn:

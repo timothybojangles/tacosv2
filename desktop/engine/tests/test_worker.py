@@ -792,6 +792,86 @@ def test_open_sales_reference_sync_compacts_large_logs(tmp_path, monkeypatch, ca
     assert len(result["logs"]) < 25
 
 
+def test_open_sales_reference_sync_honors_cancel(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("TACOS_CREDENTIAL_BACKEND", "sqlite_plaintext")
+    monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))
+    store = app_store()
+    handle(store, _request(
+        "saveAccount",
+        {"accountName": "demo", "appRef": "app", "token": "secret", "region": "euw1"},
+        "save-1",
+    ))
+    capsys.readouterr()
+    handle(store, _request("cancel", {"id": "sales-refs-cancel"}, "cancel-sales-refs"))
+    capsys.readouterr()
+    with patch.object(worker, "fetch_and_store_reference_tables") as refs:
+        handle(store, _request("syncOpenSalesReferences", {"accountName": "demo", "mode": "reference"}, "sales-refs-cancel"))
+    response = json.loads(capsys.readouterr().out.splitlines()[-1])
+    refs.assert_not_called()
+    assert response["error"]["code"] == "cancelled"
+
+
+def test_open_sales_live_passes_cancel_token_to_legacy_posts(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("TACOS_CREDENTIAL_BACKEND", "sqlite_plaintext")
+    monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))
+    store = app_store()
+    handle(store, _request(
+        "saveAccount",
+        {"accountName": "demo", "appRef": "app", "token": "secret", "region": "euw1"},
+        "save-1",
+    ))
+    capsys.readouterr()
+    db_path = worker.account_data_db(store, "demo")
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript("""
+            CREATE TABLE validated_sales_orders (
+                id INTEGER PRIMARY KEY, order_ref TEXT, contactId INTEGER, placed_on TEXT, tax_date TEXT,
+                delivery_date TEXT, warehouseId INTEGER, channelId INTEGER, statusId INTEGER, currency TEXT,
+                priceListId INTEGER, exchangeRate REAL, shippingMethodId INTEGER, payment_amount REAL,
+                payment_date TEXT, payment_ref TEXT, payment_method_code TEXT, orderId INTEGER,
+                delivery_name TEXT, delivery_line1 TEXT, delivery_line2 TEXT, delivery_line3 TEXT,
+                delivery_line4 TEXT, delivery_postcode TEXT, delivery_country TEXT, delivery_countryIsoCode TEXT,
+                delivery_telephone TEXT, delivery_email TEXT, source_csv_headers TEXT, source_csv_filename TEXT
+            );
+            INSERT INTO validated_sales_orders VALUES (
+                1, 'SO-CANCEL-TOKEN', 42, '2026-09-01', '2026-09-01', '2026-09-02', 1, 2, 5, 'GBP',
+                3, 1, 4, 12.00, '2026-09-01', 'PAY-1', 'CARD', NULL,
+                'Buyer', 'Line 1', NULL, NULL, NULL, 'AB1 2CD', 'GB', 'GB', NULL,
+                'buyer@example.com', '[]', 'source.csv'
+            );
+            CREATE TABLE validated_sales_order_rows (
+                id INTEGER PRIMARY KEY, order_ref TEXT, line_number INTEGER, item_name TEXT, item_sku TEXT,
+                item_qty REAL, item_tax_code TEXT, row_net REAL, row_tax_amount REAL, productId INTEGER,
+                rowType TEXT, original_row_json TEXT
+            );
+            INSERT INTO validated_sales_order_rows VALUES (
+                1, 'SO-CANCEL-TOKEN', 1, 'Widget', 'SKU-1', 2, 'T20', 10, 2, 101,
+                'PRODUCT', '{"order_ref":"SO-CANCEL-TOKEN"}'
+            );
+        """)
+
+    seen = {}
+
+    def order_post(*args, **kwargs):
+        seen["order_token"] = kwargs.get("cancel_token")
+        return True, 1004
+
+    def payment_post(*args, **kwargs):
+        seen["payment_token"] = kwargs.get("cancel_token")
+        return True, {"response": 2004}
+
+    with (
+        patch.object(worker, "post_sales_order", side_effect=order_post),
+        patch.object(worker, "post_sales_payment", side_effect=payment_post),
+    ):
+        handle(store, _request("runOpenSalesOrder", {
+            "accountName": "demo", "confirmAccountName": "demo"
+        }, "sales-live-cancel-token"))
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])["ok"] is True
+    assert seen["order_token"].request_id == "sales-live-cancel-token"
+    assert seen["payment_token"].request_id == "sales-live-cancel-token"
+
+
 def test_inventory_validation_uses_account_price_list_and_blank_option(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("TACOS_CREDENTIAL_BACKEND", "sqlite_plaintext")
     monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))

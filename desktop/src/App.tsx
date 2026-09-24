@@ -79,9 +79,9 @@ function requestId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.round(Math.random() * 100000)}`;
 }
 
-async function engine(method: string, params: Record<string, unknown> = {}) {
+async function engine(method: string, params: Record<string, unknown> = {}, explicitRequestId?: string) {
   const response = (await invoke("engine_request", {
-    request: { protocolVersion: 1, id: requestId(method), method, params },
+    request: { protocolVersion: 1, id: explicitRequestId || requestId(method), method, params },
   })) as WorkerResponse;
   if (!response.ok) {
     const detail = response.error?.message || "Worker request failed";
@@ -169,6 +169,8 @@ export default function App() {
   const [openSalesConfirm, setOpenSalesConfirm] = useState("");
   const [openSalesLiveStatus, setOpenSalesLiveStatus] = useState<any>(null);
   const [openSalesProgress, setOpenSalesProgress] = useState<{ percent: number; completed?: number; total?: number; message?: string } | null>(null);
+  const [openSalesActiveRequestId, setOpenSalesActiveRequestId] = useState("");
+  const openSalesRequestId = useRef<string | null>(null);
 
   const activeAccount = accounts.find((account) => account.accountName === activeAccountName) || null;
   const counts = activeAccount?.referenceCounts || emptyCounts();
@@ -358,10 +360,19 @@ export default function App() {
     if (!activeAccountName || !openSalesPath) return;
     setOpenSalesProgress({ percent: 0, message: "Starting Open Sales validation..." });
     await run("validateOpenSales", async () => {
-      const result = await engine("validateOpenSalesFile", {
-        accountName: activeAccountName,
-        path: openSalesPath,
-      });
+      const activeId = requestId("validateOpenSales");
+      openSalesRequestId.current = activeId;
+      setOpenSalesActiveRequestId(activeId);
+      let result: any;
+      try {
+        result = await engine("validateOpenSalesFile", {
+          accountName: activeAccountName,
+          path: openSalesPath,
+        }, activeId);
+      } finally {
+        openSalesRequestId.current = null;
+        setOpenSalesActiveRequestId("");
+      }
       setOpenSalesValidation(result);
       setOpenSalesPreview(result.preview);
       setOpenSalesProgress({ percent: 100, completed: result.orders, total: result.orders, message: "Open Sales validation complete." });
@@ -385,7 +396,16 @@ export default function App() {
     if (!activeAccountName) return;
     setOpenSalesProgress({ percent: 0, message: `Starting Open Sales ${mode === "all" ? "sync all" : mode}...` });
     await run(`syncOpenSales-${mode}`, async () => {
-      const result = await engine("syncOpenSalesReferences", { accountName: activeAccountName, mode });
+      const activeId = requestId(`syncOpenSales-${mode}`);
+      openSalesRequestId.current = activeId;
+      setOpenSalesActiveRequestId(activeId);
+      let result: any;
+      try {
+        result = await engine("syncOpenSalesReferences", { accountName: activeAccountName, mode }, activeId);
+      } finally {
+        openSalesRequestId.current = null;
+        setOpenSalesActiveRequestId("");
+      }
       setOpenSalesValidation((current: any) => current ? { ...current, referenceCounts: result.referenceCounts, logs: result.logs } : { referenceCounts: result.referenceCounts, logs: result.logs });
       await refreshAccounts(activeAccountName);
       setOpenSalesProgress({ percent: 100, message: "Open Sales reference sync complete." });
@@ -409,12 +429,19 @@ export default function App() {
     await run("runOpenSales", async () => {
       for (;;) {
         let result: any;
+        const activeId = requestId("runOpenSalesOrder");
+        openSalesRequestId.current = activeId;
+        setOpenSalesActiveRequestId(activeId);
         try {
           result = await engine("runOpenSalesOrder", {
             accountName,
             confirmAccountName: openSalesConfirm,
-          });
+          }, activeId);
+          openSalesRequestId.current = null;
+          setOpenSalesActiveRequestId("");
         } catch (err) {
+          openSalesRequestId.current = null;
+          setOpenSalesActiveRequestId("");
           const status = await engine("openSalesLiveStatus", { accountName });
           setOpenSalesLiveStatus(status);
           throw err;
@@ -433,6 +460,13 @@ export default function App() {
         await new Promise((resolve) => setTimeout(resolve, result.waitMs || 500));
       }
     });
+  }
+
+  async function cancelOpenSales() {
+    const activeId = openSalesActiveRequestId || openSalesRequestId.current;
+    if (!activeId) return;
+    await engine("cancel", { id: activeId });
+    setOpenSalesProgress((current) => current ? { ...current, message: "Cancellation requested. The current safe checkpoint will finish first." } : current);
   }
 
   async function validateSource() {
@@ -891,6 +925,12 @@ export default function App() {
                   {openSalesProgress.total ? ` (${openSalesProgress.completed?.toLocaleString() || 0} of ${openSalesProgress.total.toLocaleString()} orders)` : ""}
                 </span>
                 {openSalesProgress.message && <small>{openSalesProgress.message}</small>}
+                {openSalesActiveRequestId && (
+                  <button onClick={cancelOpenSales} disabled={busy === "cancelOpenSales"}>
+                    <AlertTriangle size={18} />
+                    Cancel
+                  </button>
+                )}
               </div>
             )}
             {openSalesValidation?.referenceCounts && (
