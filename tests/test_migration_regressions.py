@@ -229,6 +229,28 @@ def test_saved_order_id_prevents_second_order_creation():
     create_order.assert_not_called()
 
 
+def test_sales_sync_status_logging_is_windows_charmap_safe(monkeypatch):
+    messages = []
+
+    class Response:
+        status_code = 200
+        headers = {"Content-Type": "application/json"}
+        text = '{"response": 1}'
+
+        def json(self):
+            return {"response": 1}
+
+    def callback(message):
+        message.encode("cp1252")
+        messages.append(message)
+
+    monkeypatch.setattr(sales, "_LOG_CALLBACK", callback)
+    monkeypatch.setattr(sales.requests, "post", lambda *args, **kwargs: Response())
+    monkeypatch.setattr(sales, "sleep_with_cancel_ms", lambda *args, **kwargs: None)
+    assert sales.post_payment("https://example.invalid/payment", {}, {"amountPaid": 1})[0] is True
+    assert any("PAYMENT POST" in message for message in messages)
+
+
 def product_page(product_id, more=False):
     # Positional product-search fixture follows _flatten_product_rows.
     row = [product_id, "Test product", f"TEST-{product_id}", None, None, None,

@@ -168,9 +168,15 @@ def log(
             os.makedirs(os.path.dirname(resolved), exist_ok=True)
             with open(resolved, "a", encoding="utf-8") as log_handle:
                 log_handle.write(message + "\n")
-    print(message)
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        print(message.encode("ascii", errors="replace").decode("ascii"))
     if log_callback:
-        log_callback(message)
+        try:
+            log_callback(message)
+        except UnicodeEncodeError:
+            log_callback(message.encode("ascii", errors="replace").decode("ascii"))
 
 
 def log_sync(message: str, log_callback: LogCallback = None, *, level: str = "INFO") -> None:
@@ -203,7 +209,7 @@ def log_payload_exchange(
     """Log a full request payload and response body for payload-level diagnostics."""
     log_payload(
         (
-            f"📡 {method.upper()} {url} → {response.status_code}\n"
+            f"API {method.upper()} {url} -> {response.status_code}\n"
             f"Payload:\n{format_payload_for_log(payload)}\n"
             f"Response:\n{response.text}"
         ),
@@ -386,7 +392,7 @@ def sleep_with_cancel_ms(ms: int, cancel_token=None, log_callback: LogCallback =
     waited = 0
     while waited < ms:
         if cancel_token and cancel_token.is_set():
-            log("⏹️ Throttle sleep interrupted by cancel.", log_callback)
+            log("Throttle sleep interrupted by cancel.", log_callback)
             return
         time.sleep(min(step, ms - waited) / 1000)
         waited += step
@@ -415,7 +421,7 @@ def send_request(
         response = requests.get(url, headers=headers, verify=False, timeout=30)
         response.raise_for_status()
         body = response.text
-        log_payload(f"📥 GET {url} → {response.status_code}\n{body}", log_callback)
+        log_payload(f"GET {url} -> {response.status_code}\n{body}", log_callback)
         next_throttle_period = int(response.headers.get("brightpearl-next-throttle-period", 0))
         requests_remaining = int(response.headers.get("brightpearl-requests-remaining", 0))
         return body, next_throttle_period, requests_remaining

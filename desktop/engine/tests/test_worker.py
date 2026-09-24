@@ -8,12 +8,33 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from brightpearl.common import log
 from tacos_engine import worker
 from tacos_engine.worker import app_store, handle
 
 
 def _request(method, params=None, request_id="request-1"):
     return {"protocolVersion": 1, "id": request_id, "method": method, "params": params or {}}
+
+
+def test_logger_does_not_fail_on_windows_charmap_only_output(tmp_path, monkeypatch):
+    monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))
+    seen = []
+
+    class CharmapOnly:
+        def write(self, value):
+            value.encode("cp1252")
+
+        def flush(self):
+            return None
+
+    def callback(value):
+        value.encode("cp1252")
+        seen.append(value)
+
+    monkeypatch.setattr(sys, "stdout", CharmapOnly())
+    log("Status -> ok \u2192 unicode fallback", callback, log_file=None)
+    assert seen == ["Status -> ok ? unicode fallback"]
 
 
 def test_source_entrypoint_starts_outside_repository_root(tmp_path):

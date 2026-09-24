@@ -43,7 +43,7 @@ def _log(message: str) -> None:
 
 
 def _sleep_with_log(ms: int, *, cancel_token=None) -> None:
-    _log(f"⏳ Sleeping for {ms} ms due to throttling…")
+    _log(f"Sleeping for {ms} ms due to throttling...")
     sleep_with_cancel_ms(ms, cancel_token=cancel_token, log_callback=_LOG_CALLBACK)
 
 
@@ -268,12 +268,12 @@ def post_order(url, headers, payload, *, cancel_token=None):
     max_retries, default_sleep_ms = get_upload_retry_settings()
     for attempt in range(1, max_retries + 1):
         if cancel_token and cancel_token.is_set():
-            _log("🛑 Cancel requested before posting order.")
+            _log("Cancel requested before posting order.")
             return False, None
         try:
             resp = requests.post(url, json=payload, headers=headers, verify=False)
             log_payload_exchange("POST", url, payload, resp, _LOG_CALLBACK)
-            _log(f"ORDER POST {url} attempt {attempt} → {resp.status_code}")
+            _log(f"ORDER POST {url} attempt {attempt} -> {resp.status_code}")
             if 200 <= resp.status_code < 300:
                 record_api_update(estimate_record_count(payload))
                 data = resp.json() if "application/json" in resp.headers.get("Content-Type","") else {}
@@ -295,11 +295,11 @@ def post_order(url, headers, payload, *, cancel_token=None):
                 if created_id:
                     return True, int(created_id)
                 else:
-                    _log("⚠️ 200 OK but no 'response' id in body.")
+                    _log("Warning: 200 OK but no 'response' id in body.")
             else:
-                _log(f"❌ Order {resp.status_code}: {resp.text[:500]}")
+                _log(f"Order failed {resp.status_code}: {resp.text[:500]}")
         except requests.RequestException as e:
-            _log(f"❌ Order request error: {e}")
+            _log(f"Order request error: {e}")
         sleep_with_cancel_ms(
             int(attempt * 1000),
             cancel_token=cancel_token,
@@ -329,12 +329,12 @@ def post_payment(url, headers, payload, *, cancel_token=None):
     max_retries, default_sleep_ms = get_upload_retry_settings()
     for attempt in range(1, max_retries + 1):
         if cancel_token and cancel_token.is_set():
-            _log("🛑 Cancel requested before posting payment.")
+            _log("Cancel requested before posting payment.")
             return False, None
         try:
             resp = requests.post(url, json=payload, headers=headers, verify=False)
             log_payload_exchange("POST", url, payload, resp, _LOG_CALLBACK)
-            _log(f"PAYMENT POST {url} attempt {attempt} → {resp.status_code}")
+            _log(f"PAYMENT POST {url} attempt {attempt} -> {resp.status_code}")
             if resp.status_code == 200:
                 record_api_update(estimate_record_count(payload))
                 rem = int(resp.headers.get("brightpearl-requests-remaining", 3))
@@ -349,9 +349,9 @@ def post_payment(url, headers, payload, *, cancel_token=None):
                     )
                 return True, (resp.json() if "application/json" in resp.headers.get("Content-Type","") else resp.text)
             else:
-                _log(f"❌ Payment {resp.status_code}: {resp.text[:500]}")
+                _log(f"Payment failed {resp.status_code}: {resp.text[:500]}")
         except requests.RequestException as e:
-            _log(f"❌ Payment request error: {e}")
+            _log(f"Payment request error: {e}")
         sleep_with_cancel_ms(
             int(attempt * 1000),
             cancel_token=cancel_token,
@@ -374,7 +374,7 @@ def write_failed_orders_csv(account_name, failed, filename_tag):
         for fo in failed:
             for r in fo["rows"]:
                 w.writerow(json.loads(r["original_row_json"]))
-    _log(f"⚠️ Wrote {sum(len(o['rows']) for o in failed)} rows to {out_path}")
+    _log(f"Warning: Wrote {sum(len(o['rows']) for o in failed)} rows to {out_path}")
 
 def main(
     account_name,
@@ -418,11 +418,11 @@ def main(
 
     for order in orders:
         if cancel_token and cancel_token.is_set():
-            _log("🛑 Cancel requested before processing next order.")
+            _log("Cancel requested before processing next order.")
             break
         created_id = order.get("orderId")
         if created_id:
-            _log(f"↪️ Reusing saved Brightpearl orderId {created_id} for {order['order_ref']}.")
+            _log(f"Reusing saved Brightpearl orderId {created_id} for {order['order_ref']}.")
         else:
             # 1) Create order
             order_payload = build_bp_order_payload(order)
@@ -433,7 +433,7 @@ def main(
                 cancel_token=cancel_token,
             )
             if cancel_token and cancel_token.is_set():
-                _log("🛑 Cancel detected after order attempt; stopping.")
+                _log("Cancel detected after order attempt; stopping.")
                 break
             if not ok or not created_id:
                 failed_orders.append(order)
@@ -446,7 +446,7 @@ def main(
                 update_order_id(db_path, order["order_ref"], created_id)
                 order["orderId"] = created_id
             except Exception as e:
-                _log(f"⚠️ Failed to update orderId in DB for {order['order_ref']}: {e}")
+                _log(f"Warning: Failed to update orderId in DB for {order['order_ref']}: {e}")
 
         # 2) Conditionally post payment
         try:
@@ -463,12 +463,12 @@ def main(
                 cancel_token=cancel_token,
             )
             if cancel_token and cancel_token.is_set():
-                _log("🛑 Cancel detected after payment attempt; stopping.")
+                _log("Cancel detected after payment attempt; stopping.")
                 break
             if not okp:
                 failed_payments.append(order)
         elif amt > 0:
-            _log(f"⚠️ Skipping payment for {order['order_ref']}: missing payment_method_code or payment_date")
+            _log(f"Warning: Skipping payment for {order['order_ref']}: missing payment_method_code or payment_date")
 
         if not (order in failed_payments):
             conn = connect_sqlite(db_path)
@@ -488,11 +488,11 @@ def main(
         write_failed_orders_csv(account_name, failed_payments, "failed_sales_order_payments")
 
     if cancel_token and cancel_token.is_set():
-        _log("🛑 Sales order sync cancelled by user.")
+        _log("Sales order sync cancelled by user.")
     elif failed_orders or failed_payments:
-        _log(f"❌ Orders failed: {len(failed_orders)} | Payments failed: {len(failed_payments)}")
+        _log(f"Orders failed: {len(failed_orders)} | Payments failed: {len(failed_payments)}")
     else:
-        _log("✅ All orders (and payments, where applicable) synced successfully.")
+        _log("All orders (and payments, where applicable) synced successfully.")
 
 
 if __name__ == "__main__":
