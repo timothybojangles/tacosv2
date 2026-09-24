@@ -449,6 +449,66 @@ def test_open_sales_validation_stages_orders_and_preview(tmp_path, monkeypatch, 
     assert preview["referenceCounts"]["validatedOrders"] == 1
 
 
+def test_open_sales_single_validated_row_posts_payment(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("TACOS_CREDENTIAL_BACKEND", "sqlite_plaintext")
+    monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))
+    store = app_store()
+    handle(store, _request(
+        "saveAccount",
+        {"accountName": "demo", "appRef": "app", "token": "secret", "region": "euw1"},
+        "save-1",
+    ))
+    capsys.readouterr()
+
+    db_path = worker.account_data_db(store, "demo")
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript("""
+            CREATE TABLE contact_catalogue (contactId INTEGER, primaryEmail TEXT, isCustomer INTEGER, isSupplier INTEGER);
+            INSERT INTO contact_catalogue VALUES (42, 'buyer@example.com', 1, 0);
+            CREATE TABLE product_catalogue (productId INTEGER, SKU TEXT);
+            INSERT INTO product_catalogue VALUES (101, 'SKU-1');
+            CREATE TABLE ref_warehouses (warehouseId INTEGER, name TEXT);
+            INSERT INTO ref_warehouses VALUES (1, 'Main');
+            CREATE TABLE ref_channels (channelId INTEGER, code TEXT, name TEXT);
+            INSERT INTO ref_channels VALUES (2, 'WEB', 'Web');
+            CREATE TABLE ref_price_lists (priceListId INTEGER, code TEXT, name TEXT);
+            INSERT INTO ref_price_lists VALUES (3, 'GBP', 'GBP Retail');
+            CREATE TABLE ref_currencies (isoCode TEXT);
+            INSERT INTO ref_currencies VALUES ('GBP');
+            CREATE TABLE ref_shipping_methods (shippingMethodId INTEGER, code TEXT, name TEXT);
+            INSERT INTO ref_shipping_methods VALUES (4, 'STD', 'Standard');
+            CREATE TABLE ref_payment_methods (code TEXT);
+            INSERT INTO ref_payment_methods VALUES ('CARD');
+            CREATE TABLE ref_order_statuses (statusId INTEGER, code TEXT, name TEXT, rawJson TEXT);
+            INSERT INTO ref_order_statuses VALUES (5, 'NEW', 'New', '{"orderTypeCode":"SO"}');
+        """)
+    source = tmp_path / "paid-open-sales.csv"
+    source.write_text(
+        "\n".join([
+            "order_ref,placed_on,tax_date,delivery_date,customer_email,warehouse,channel,order_status,currency,price_list,exchange_rate,shipping_method,payment_amount,payment_date,payment_ref,payment_method_code,delivery_address_name,delivery_address_line1,delivery_address_line2,delivery_address_line3,delivery_address_line4,delivery_postcode,delivery_country,delivery_telephone,delivery_email,item_name,item_sku,item qty,item_tax_code,row_net,row_tax_amount",
+            "SO-PAID,01/09/2026,01/09/2026,02/09/2026,buyer@example.com,Main,WEB,NEW,GBP,GBP,1,STD,12.00,01/09/2026,PAY-1,CARD,Buyer,Line 1,,,,AB1 2CD,GB,,buyer@example.com,Widget,SKU-1,2,T20,10.00,2.00",
+        ]),
+        encoding="utf-8",
+    )
+    handle(store, _request("validateOpenSalesFile", {"accountName": "demo", "path": str(source)}, "sales-validate-paid"))
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])["result"]["preview"]["payments"] == 1
+
+    with (
+        patch.object(worker, "post_sales_order", return_value=(True, 1001)),
+        patch.object(worker, "post_sales_payment", return_value=(True, {"response": 2001})) as post_payment,
+    ):
+        handle(store, _request("runOpenSalesOrder", {
+            "accountName": "demo", "confirmAccountName": "demo"
+        }, "sales-live-paid"))
+    result = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
+    assert result["paymentState"] == "succeeded"
+    post_payment.assert_called_once()
+    payload = post_payment.call_args.args[2]
+    assert payload["orderId"] == 1001
+    assert payload["paymentMethodCode"] == "CARD"
+    assert payload["amountPaid"] == 12.0
+
+
 def test_open_sales_live_retry_reuses_saved_order_id(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("TACOS_CREDENTIAL_BACKEND", "sqlite_plaintext")
     monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))
@@ -513,6 +573,57 @@ def test_open_sales_live_retry_reuses_saved_order_id(tmp_path, monkeypatch, caps
     create_order_again.assert_not_called()
     assert result["orderId"] == 999
     assert result["paymentState"] == "succeeded"
+
+
+def test_open_sales_payment_amount_without_details_errors(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("TACOS_CREDENTIAL_BACKEND", "sqlite_plaintext")
+    monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))
+    store = app_store()
+    handle(store, _request(
+        "saveAccount",
+        {"accountName": "demo", "appRef": "app", "token": "secret", "region": "euw1"},
+        "save-1",
+    ))
+    capsys.readouterr()
+    db_path = worker.account_data_db(store, "demo")
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript("""
+            CREATE TABLE validated_sales_orders (
+                id INTEGER PRIMARY KEY, order_ref TEXT, contactId INTEGER, placed_on TEXT, tax_date TEXT,
+                delivery_date TEXT, warehouseId INTEGER, channelId INTEGER, statusId INTEGER, currency TEXT,
+                priceListId INTEGER, exchangeRate REAL, shippingMethodId INTEGER, payment_amount REAL,
+                payment_date TEXT, payment_ref TEXT, payment_method_code TEXT, orderId INTEGER,
+                delivery_name TEXT, delivery_line1 TEXT, delivery_line2 TEXT, delivery_line3 TEXT,
+                delivery_line4 TEXT, delivery_postcode TEXT, delivery_country TEXT, delivery_countryIsoCode TEXT,
+                delivery_telephone TEXT, delivery_email TEXT, source_csv_headers TEXT, source_csv_filename TEXT
+            );
+            INSERT INTO validated_sales_orders VALUES (
+                1, 'SO-MISSING-PAYMENT', 42, '2026-09-01', '2026-09-01', '2026-09-02', 1, 2, 5, 'GBP',
+                3, 1, 4, 12.00, NULL, 'PAY-1', NULL, NULL,
+                'Buyer', 'Line 1', NULL, NULL, NULL, 'AB1 2CD', 'GB', 'GB', NULL,
+                'buyer@example.com', '[]', 'source.csv'
+            );
+            CREATE TABLE validated_sales_order_rows (
+                id INTEGER PRIMARY KEY, order_ref TEXT, line_number INTEGER, item_name TEXT, item_sku TEXT,
+                item_qty REAL, item_tax_code TEXT, row_net REAL, row_tax_amount REAL, productId INTEGER,
+                rowType TEXT, original_row_json TEXT
+            );
+            INSERT INTO validated_sales_order_rows VALUES (
+                1, 'SO-MISSING-PAYMENT', 1, 'Widget', 'SKU-1', 2, 'T20', 10, 2, 101,
+                'PRODUCT', '{"order_ref":"SO-MISSING-PAYMENT"}'
+            );
+        """)
+
+    with (
+        patch.object(worker, "post_sales_order", return_value=(True, 1002)),
+        patch.object(worker, "post_sales_payment") as post_payment,
+    ):
+        handle(store, _request("runOpenSalesOrder", {
+            "accountName": "demo", "confirmAccountName": "demo"
+        }, "sales-live-missing-payment"))
+    failed = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert failed["error"]["code"] == "missing_payment_details"
+    post_payment.assert_not_called()
 
 
 def test_open_sales_template_and_reference_sync_parity(tmp_path, monkeypatch, capsys):

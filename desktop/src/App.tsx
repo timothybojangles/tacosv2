@@ -388,10 +388,17 @@ export default function App() {
     const accountName = activeAccountName;
     await run("runOpenSales", async () => {
       for (;;) {
-        const result = await engine("runOpenSalesOrder", {
-          accountName,
-          confirmAccountName: openSalesConfirm,
-        });
+        let result: any;
+        try {
+          result = await engine("runOpenSalesOrder", {
+            accountName,
+            confirmAccountName: openSalesConfirm,
+          });
+        } catch (err) {
+          const status = await engine("openSalesLiveStatus", { accountName });
+          setOpenSalesLiveStatus(status);
+          throw err;
+        }
         const status = await engine("openSalesLiveStatus", { accountName });
         setOpenSalesLiveStatus(status);
         setMessage(`Open Sales order ${result.orderRef} confirmed as Brightpearl order ${result.orderId}.`);

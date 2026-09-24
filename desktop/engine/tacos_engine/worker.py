@@ -1296,7 +1296,12 @@ def run_open_sales_order(store: Store, request_id: str, params: dict[str, Any]) 
             raise WorkerError("write_uncertain", f"Order {order_ref}: payment failed. The order id {order_id} is saved; retry will not recreate the order.")
         payment_state = "succeeded"
     elif payment_required:
-        payment_state = "skipped_missing_details"
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE open_sales_live_orders SET state = 'payment_failed', payment_state = 'missing_details', error = ?, updated_at = ? WHERE order_ref = ?",
+                ("Payment amount is present but payment date or method is missing.", time.time(), order_ref),
+            )
+        raise WorkerError("missing_payment_details", f"Order {order_ref}: payment amount is present but payment_date or payment_method_code is missing.")
     else:
         payment_state = "not_required"
 
