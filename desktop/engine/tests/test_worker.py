@@ -596,6 +596,65 @@ def test_open_sales_live_retry_reuses_saved_order_id(tmp_path, monkeypatch, caps
     assert result["paymentState"] == "succeeded"
 
 
+def test_open_sales_live_suppresses_legacy_stdout(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("TACOS_CREDENTIAL_BACKEND", "sqlite_plaintext")
+    monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))
+    store = app_store()
+    handle(store, _request(
+        "saveAccount",
+        {"accountName": "demo", "appRef": "app", "token": "secret", "region": "euw1"},
+        "save-1",
+    ))
+    capsys.readouterr()
+    db_path = worker.account_data_db(store, "demo")
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript("""
+            CREATE TABLE validated_sales_orders (
+                id INTEGER PRIMARY KEY, order_ref TEXT, contactId INTEGER, placed_on TEXT, tax_date TEXT,
+                delivery_date TEXT, warehouseId INTEGER, channelId INTEGER, statusId INTEGER, currency TEXT,
+                priceListId INTEGER, exchangeRate REAL, shippingMethodId INTEGER, payment_amount REAL,
+                payment_date TEXT, payment_ref TEXT, payment_method_code TEXT, orderId INTEGER,
+                delivery_name TEXT, delivery_line1 TEXT, delivery_line2 TEXT, delivery_line3 TEXT,
+                delivery_line4 TEXT, delivery_postcode TEXT, delivery_country TEXT, delivery_countryIsoCode TEXT,
+                delivery_telephone TEXT, delivery_email TEXT, source_csv_headers TEXT, source_csv_filename TEXT
+            );
+            INSERT INTO validated_sales_orders VALUES (
+                1, 'SO-STDOUT', 42, '2026-09-01', '2026-09-01', '2026-09-02', 1, 2, 5, 'GBP',
+                3, 1, 4, 12.00, '2026-09-01', 'PAY-1', 'CARD', NULL,
+                'Buyer', 'Line 1', NULL, NULL, NULL, 'AB1 2CD', 'GB', 'GB', NULL,
+                'buyer@example.com', '[]', 'source.csv'
+            );
+            CREATE TABLE validated_sales_order_rows (
+                id INTEGER PRIMARY KEY, order_ref TEXT, line_number INTEGER, item_name TEXT, item_sku TEXT,
+                item_qty REAL, item_tax_code TEXT, row_net REAL, row_tax_amount REAL, productId INTEGER,
+                rowType TEXT, original_row_json TEXT
+            );
+            INSERT INTO validated_sales_order_rows VALUES (
+                1, 'SO-STDOUT', 1, 'Widget', 'SKU-1', 2, 'T20', 10, 2, 101,
+                'PRODUCT', '{"order_ref":"SO-STDOUT"}'
+            );
+        """)
+
+    def noisy_order(*args, **kwargs):
+        print("ORDER POST raw legacy line")
+        return True, 1003
+
+    def noisy_payment(*args, **kwargs):
+        print("PAYMENT POST raw legacy line")
+        return True, {"response": 2003}
+
+    with (
+        patch.object(worker, "post_sales_order", side_effect=noisy_order),
+        patch.object(worker, "post_sales_payment", side_effect=noisy_payment),
+    ):
+        handle(store, _request("runOpenSalesOrder", {
+            "accountName": "demo", "confirmAccountName": "demo"
+        }, "sales-live-stdout"))
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["result"]["paymentState"] == "succeeded"
+
+
 def test_open_sales_payment_amount_without_details_errors(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("TACOS_CREDENTIAL_BACKEND", "sqlite_plaintext")
     monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))
@@ -698,6 +757,39 @@ def test_open_sales_template_and_reference_sync_parity(tmp_path, monkeypatch, ca
     assert sync["referenceCounts"]["channels"] == 1
     assert sync["referenceCounts"]["customers"] == 1
     assert sync["referenceCounts"]["products"] == 1
+
+
+def test_open_sales_reference_sync_compacts_large_logs(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("TACOS_CREDENTIAL_BACKEND", "sqlite_plaintext")
+    monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))
+    store = app_store()
+    handle(store, _request(
+        "saveAccount",
+        {"accountName": "demo", "appRef": "app", "token": "secret", "region": "euw1"},
+        "save-1",
+    ))
+    capsys.readouterr()
+
+    def noisy_reference_sync(*args, **kwargs):
+        log_callback = kwargs["log_callback"]
+        for index in range(200):
+            log_callback(f"Reference row {index} " + ("x" * 1000))
+        with sqlite3.connect(args[3]) as conn:
+            conn.execute("CREATE TABLE ref_channels (channelId INTEGER)")
+            conn.execute("INSERT INTO ref_channels VALUES (1)")
+        return {"channels": 1}
+
+    with (
+        patch.object(worker, "fetch_and_store_reference_tables", side_effect=noisy_reference_sync),
+        patch.object(worker, "update_contact_catalogue", return_value=0),
+        patch.object(worker, "update_product_catalogue", return_value=0),
+    ):
+        handle(store, _request("syncOpenSalesReferences", {"accountName": "demo", "mode": "reference"}, "sales-refs-big"))
+    line = capsys.readouterr().out.splitlines()[-1]
+    assert len(line.encode("utf-8")) < worker.MAX_MESSAGE_BYTES
+    result = json.loads(line)["result"]
+    assert result["results"] == {"reference": {"channels": 1}}
+    assert len(result["logs"]) < 25
 
 
 def test_inventory_validation_uses_account_price_list_and_blank_option(tmp_path, monkeypatch, capsys):

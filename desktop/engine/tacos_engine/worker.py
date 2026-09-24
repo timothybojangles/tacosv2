@@ -666,6 +666,20 @@ def legacy_operations() -> dict[str, Any]:
     return {"operations": LEGACY_OPERATIONS, "categories": categories}
 
 
+def compact_logs(logs: list[str], *, max_entries: int = 25, max_chars: int = 12000) -> list[str]:
+    compacted: list[str] = []
+    total = 0
+    for message in reversed(logs[-max_entries:]):
+        text = str(message)
+        if len(text) > 1000:
+            text = text[:1000] + "... [truncated]"
+        total += len(text)
+        if total > max_chars:
+            break
+        compacted.insert(0, text)
+    return compacted
+
+
 def settings_payload() -> dict[str, Any]:
     return {
         "settings": asdict(get_settings()),
@@ -1175,7 +1189,13 @@ def sync_open_sales_references(store: Store, request_id: str, params: dict[str, 
         state="succeeded",
         message="Open Sales reference sync complete.",
     )
-    return {"accountName": account_name, "mode": mode, "results": results, "referenceCounts": sales_reference_counts(db_path), "logs": logs}
+    return {
+        "accountName": account_name,
+        "mode": mode,
+        "results": results,
+        "referenceCounts": sales_reference_counts(db_path),
+        "logs": compact_logs(logs),
+    }
 
 
 def ensure_open_sales_live_tables(conn: sqlite3.Connection) -> None:
@@ -1262,7 +1282,8 @@ def run_open_sales_order(store: Store, request_id: str, params: dict[str, Any]) 
 
     if not order_id:
         payload = build_sales_order_payload(order)
-        ok, created_id = post_sales_order(order_url, headers, payload)
+        with legacy_operation(store):
+            ok, created_id = post_sales_order(order_url, headers, payload)
         if not ok or not created_id:
             with sqlite3.connect(db_path) as conn:
                 conn.execute(
@@ -1286,7 +1307,8 @@ def run_open_sales_order(store: Store, request_id: str, params: dict[str, Any]) 
         payment_required = False
     if payment_required and order.get("payment_method_code") and order.get("payment_date"):
         payment_payload = build_sales_payment_payload(order_id, order)
-        ok, _ = post_sales_payment(payment_url, headers, payment_payload)
+        with legacy_operation(store):
+            ok, _ = post_sales_payment(payment_url, headers, payment_payload)
         if not ok:
             with sqlite3.connect(db_path) as conn:
                 conn.execute(
