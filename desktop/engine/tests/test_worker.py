@@ -651,8 +651,8 @@ def test_open_sales_live_suppresses_legacy_stdout(tmp_path, monkeypatch, capsys)
             "accountName": "demo", "confirmAccountName": "demo"
         }, "sales-live-stdout"))
     lines = capsys.readouterr().out.splitlines()
-    assert len(lines) == 1
-    assert json.loads(lines[0])["result"]["paymentState"] == "succeeded"
+    assert all("raw legacy line" not in line for line in lines)
+    assert json.loads(lines[-1])["result"]["paymentState"] == "succeeded"
 
 
 def test_open_sales_payment_amount_without_details_errors(tmp_path, monkeypatch, capsys):

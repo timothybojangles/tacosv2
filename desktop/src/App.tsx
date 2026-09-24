@@ -168,6 +168,7 @@ export default function App() {
   const [openSalesPreview, setOpenSalesPreview] = useState<any>(null);
   const [openSalesConfirm, setOpenSalesConfirm] = useState("");
   const [openSalesLiveStatus, setOpenSalesLiveStatus] = useState<any>(null);
+  const [openSalesProgress, setOpenSalesProgress] = useState<{ percent: number; completed?: number; total?: number; message?: string } | null>(null);
 
   const activeAccount = accounts.find((account) => account.accountName === activeAccountName) || null;
   const counts = activeAccount?.referenceCounts || emptyCounts();
@@ -200,7 +201,20 @@ export default function App() {
         message: data.message || current?.message,
       }));
     });
-    return () => { void unlisten.then((stop) => stop()); };
+    const unlistenEngine = listen<any>("engine-event", ({ payload }) => {
+      const data = payload?.data;
+      if (!data || !String(data.operation || "").startsWith("open_sales_")) return;
+      setOpenSalesProgress((current) => ({
+        percent: typeof data.percent === "number" ? data.percent : current?.percent || 0,
+        completed: data.completed ?? current?.completed,
+        total: data.total ?? current?.total,
+        message: data.message || current?.message,
+      }));
+    });
+    return () => {
+      void unlisten.then((stop) => stop());
+      void unlistenEngine.then((stop) => stop());
+    };
   }, []);
 
   useEffect(() => {
@@ -211,6 +225,7 @@ export default function App() {
     setOpenSalesPreview(null);
     setOpenSalesConfirm("");
     setOpenSalesLiveStatus(null);
+    setOpenSalesProgress(null);
     setLiveConfirm("");
     setLiveProgress(null);
     setLiveBatches([]);
@@ -341,6 +356,7 @@ export default function App() {
 
   async function validateOpenSalesSource() {
     if (!activeAccountName || !openSalesPath) return;
+    setOpenSalesProgress({ percent: 0, message: "Starting Open Sales validation..." });
     await run("validateOpenSales", async () => {
       const result = await engine("validateOpenSalesFile", {
         accountName: activeAccountName,
@@ -348,6 +364,7 @@ export default function App() {
       });
       setOpenSalesValidation(result);
       setOpenSalesPreview(result.preview);
+      setOpenSalesProgress({ percent: 100, completed: result.orders, total: result.orders, message: "Open Sales validation complete." });
       setMessage(`Open Sales validation complete: ${result.orders} order(s), ${result.rows} row(s) staged.`);
     });
   }
@@ -366,10 +383,12 @@ export default function App() {
 
   async function syncOpenSalesReferences(mode: "all" | "reference" | "contacts" | "products") {
     if (!activeAccountName) return;
+    setOpenSalesProgress({ percent: 0, message: `Starting Open Sales ${mode === "all" ? "sync all" : mode}...` });
     await run(`syncOpenSales-${mode}`, async () => {
       const result = await engine("syncOpenSalesReferences", { accountName: activeAccountName, mode });
       setOpenSalesValidation((current: any) => current ? { ...current, referenceCounts: result.referenceCounts, logs: result.logs } : { referenceCounts: result.referenceCounts, logs: result.logs });
       await refreshAccounts(activeAccountName);
+      setOpenSalesProgress({ percent: 100, message: "Open Sales reference sync complete." });
       setMessage(`Open Sales ${mode === "all" ? "sync all" : mode} complete.`);
     });
   }
@@ -386,6 +405,7 @@ export default function App() {
   async function runOpenSalesLive() {
     if (!activeAccountName || openSalesConfirm !== activeAccountName) return;
     const accountName = activeAccountName;
+    setOpenSalesProgress({ percent: 0, message: "Starting Open Sales sync..." });
     await run("runOpenSales", async () => {
       for (;;) {
         let result: any;
@@ -401,6 +421,13 @@ export default function App() {
         }
         const status = await engine("openSalesLiveStatus", { accountName });
         setOpenSalesLiveStatus(status);
+        const completed = Math.max(0, (result.total || 0) - (result.remaining || 0));
+        setOpenSalesProgress({
+          percent: result.total ? Math.round((completed / result.total) * 100) : 100,
+          completed,
+          total: result.total,
+          message: `Confirmed ${result.orderRef}.`,
+        });
         setMessage(`Open Sales order ${result.orderRef} confirmed as Brightpearl order ${result.orderId}.`);
         if (result.done) break;
         await new Promise((resolve) => setTimeout(resolve, result.waitMs || 500));
@@ -856,6 +883,16 @@ export default function App() {
                 </button>
               </section>
             </div>
+            {openSalesProgress && (
+              <div className="syncProgress" aria-live="polite">
+                <div className="progressTrack"><span style={{ width: `${openSalesProgress.percent}%` }} /></div>
+                <span>
+                  {openSalesProgress.percent}%
+                  {openSalesProgress.total ? ` (${openSalesProgress.completed?.toLocaleString() || 0} of ${openSalesProgress.total.toLocaleString()} orders)` : ""}
+                </span>
+                {openSalesProgress.message && <small>{openSalesProgress.message}</small>}
+              </div>
+            )}
             {openSalesValidation?.referenceCounts && (
               <div className="counts wideCounts">
                 {Object.entries(openSalesValidation.referenceCounts).map(([key, value]) => (

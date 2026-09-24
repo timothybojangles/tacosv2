@@ -1092,6 +1092,7 @@ def validate_open_sales_file(store: Store, request_id: str, params: dict[str, An
     if credentials:
         prepare_legacy_credentials(store, account_name, credentials, account_meta.get("baseCurrency"))
     update_job(store, request_id, kind="open_sales_validation", state="running", source_path=str(path), dataset_id=account_name)
+    emit_event(request_id, "progress", {"operation": "open_sales_validation", "percent": 0, "message": "Starting Open Sales validation."})
     logs: list[str] = []
 
     def worker_log(message: str) -> None:
@@ -1111,6 +1112,7 @@ def validate_open_sales_file(store: Store, request_id: str, params: dict[str, An
         state="succeeded" if orders > 0 else "succeeded_with_warnings",
         message=f"Validated {orders} order(s) and {rows} row(s). Checkpointed live posting is available.",
     )
+    emit_event(request_id, "progress", {"operation": "open_sales_validation", "percent": 100, "message": f"Validated {orders} order(s) and {rows} row(s)."})
     return {
         "validationJobId": request_id,
         "orders": orders,
@@ -1148,6 +1150,31 @@ def save_open_sales_template(store: Store, params: dict[str, Any]) -> dict[str, 
     return {"path": str(destination), "headers": SALES_TEMPLATE_HEADERS}
 
 
+def write_open_sales_failed_csv(store: Store, account_name: str, order: dict[str, Any], filename_tag: str) -> Path:
+    reports_dir = store.accounts / account_name / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    path = reports_dir / f"{account_name}_{filename_tag}_{int(time.time())}.csv"
+    rows = []
+    headers: list[str] = []
+    for row in order.get("rows", []):
+        try:
+            original = json.loads(row.get("original_row_json") or "{}")
+        except (TypeError, ValueError):
+            original = {"order_ref": order.get("order_ref")}
+        for key in original:
+            if key not in headers:
+                headers.append(key)
+        rows.append(original)
+    if not headers:
+        headers = list(order.get("source_headers") or ["order_ref"])
+        rows = [{"order_ref": order.get("order_ref")}]
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=headers, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+    return path
+
+
 def sync_open_sales_references(store: Store, request_id: str, params: dict[str, Any]) -> dict[str, Any]:
     account_name = normalize_account_name(params.get("accountName"))
     mode = str(params.get("mode") or "all").strip()
@@ -1157,6 +1184,7 @@ def sync_open_sales_references(store: Store, request_id: str, params: dict[str, 
     db_path = account_data_db(store, account_name)
     prepare_legacy_credentials(store, account_name, credentials, account_summary_without_secret(store, account_name).get("baseCurrency"))
     update_job(store, request_id, kind="open_sales_reference_sync", state="running", source_path=mode, dataset_id=account_name)
+    emit_event(request_id, "progress", {"operation": "open_sales_reference_sync", "percent": 0, "message": "Starting Open Sales reference sync."})
     logs: list[str] = []
 
     def worker_log(message: str) -> None:
@@ -1165,11 +1193,19 @@ def sync_open_sales_references(store: Store, request_id: str, params: dict[str, 
         if len(logs) > 100:
             del logs[: len(logs) - 100]
         if text.startswith("PROGRESS:"):
-            emit_event(request_id, "progress", {"operation": "open_sales_reference_sync", "message": text})
+            try:
+                percent = max(0, min(100, int(text.split(":", 1)[1])))
+            except (IndexError, ValueError):
+                percent = None
+            event: dict[str, Any] = {"operation": "open_sales_reference_sync", "message": text}
+            if percent is not None:
+                event["percent"] = percent
+            emit_event(request_id, "progress", event)
 
     results: dict[str, Any] = {}
     with legacy_operation(store):
         if mode in {"all", "reference"}:
+            emit_event(request_id, "progress", {"operation": "open_sales_reference_sync", "percent": 10, "message": "Syncing Open Sales reference data."})
             results["reference"] = fetch_and_store_reference_tables(
                 account_name,
                 credentials.region,
@@ -1178,10 +1214,13 @@ def sync_open_sales_references(store: Store, request_id: str, params: dict[str, 
                 log_callback=worker_log,
             )
         if mode in {"all", "contacts"}:
+            emit_event(request_id, "progress", {"operation": "open_sales_reference_sync", "percent": 34, "message": "Syncing contact references."})
             results["contacts"] = update_contact_catalogue(account_name, str(db_path), log_callback=worker_log)
         if mode in {"all", "products"}:
+            emit_event(request_id, "progress", {"operation": "open_sales_reference_sync", "percent": 67, "message": "Syncing product references."})
             results["products"] = update_product_catalogue(account_name, str(db_path), log_callback=worker_log)
 
+    emit_event(request_id, "progress", {"operation": "open_sales_reference_sync", "percent": 100, "message": "Open Sales reference sync complete."})
     update_job(
         store,
         request_id,
@@ -1260,6 +1299,13 @@ def run_open_sales_order(store: Store, request_id: str, params: dict[str, Any]) 
 
     update_job(store, request_id, kind="open_sales_live_order", state="running", dataset_id=account_name,
                message=f"Sending Open Sales order {order_ref}.")
+    emit_event(request_id, "progress", {
+        "operation": "open_sales_live_order",
+        "percent": int(((total - len(orders)) / max(total, 1)) * 100),
+        "completed": max(0, total - len(orders)),
+        "total": total,
+        "message": f"Sending Open Sales order {order_ref}.",
+    })
     order_url = (
         f"https://{credentials.region}.brightpearlconnect.com/public-api/{account_name}/"
         "order-service/sales-order"
@@ -1285,12 +1331,13 @@ def run_open_sales_order(store: Store, request_id: str, params: dict[str, Any]) 
         with legacy_operation(store):
             ok, created_id = post_sales_order(order_url, headers, payload)
         if not ok or not created_id:
+            report_path = write_open_sales_failed_csv(store, account_name, order, "failed_sales_orders")
             with sqlite3.connect(db_path) as conn:
                 conn.execute(
                     "UPDATE open_sales_live_orders SET state = 'unknown', error = ?, updated_at = ? WHERE order_ref = ?",
-                    ("Order creation was not confirmed by Brightpearl.", time.time(), order_ref),
+                    (f"Order creation was not confirmed by Brightpearl. Failed CSV: {report_path}", time.time(), order_ref),
                 )
-            raise WorkerError("write_uncertain", f"Order {order_ref}: Brightpearl order creation was not confirmed. Reconcile before retrying.")
+            raise WorkerError("write_uncertain", f"Order {order_ref}: Brightpearl order creation was not confirmed. Failed CSV: {report_path}. Reconcile before retrying.")
         order_id = int(created_id)
         update_sales_order_id(str(db_path), order_ref, order_id)
         order["orderId"] = order_id
@@ -1310,20 +1357,22 @@ def run_open_sales_order(store: Store, request_id: str, params: dict[str, Any]) 
         with legacy_operation(store):
             ok, _ = post_sales_payment(payment_url, headers, payment_payload)
         if not ok:
+            report_path = write_open_sales_failed_csv(store, account_name, order, "failed_sales_order_payments")
             with sqlite3.connect(db_path) as conn:
                 conn.execute(
                     "UPDATE open_sales_live_orders SET state = 'payment_failed', payment_state = 'failed', error = ?, updated_at = ? WHERE order_ref = ?",
-                    ("Payment failed. The order id is saved; retry will reuse it.", time.time(), order_ref),
+                    (f"Payment failed. The order id is saved; retry will reuse it. Failed CSV: {report_path}", time.time(), order_ref),
                 )
-            raise WorkerError("write_uncertain", f"Order {order_ref}: payment failed. The order id {order_id} is saved; retry will not recreate the order.")
+            raise WorkerError("write_uncertain", f"Order {order_ref}: payment failed. The order id {order_id} is saved; retry will not recreate the order. Failed CSV: {report_path}.")
         payment_state = "succeeded"
     elif payment_required:
+        report_path = write_open_sales_failed_csv(store, account_name, order, "failed_sales_order_payments")
         with sqlite3.connect(db_path) as conn:
             conn.execute(
                 "UPDATE open_sales_live_orders SET state = 'payment_failed', payment_state = 'missing_details', error = ?, updated_at = ? WHERE order_ref = ?",
-                ("Payment amount is present but payment date or method is missing.", time.time(), order_ref),
+                (f"Payment amount is present but payment date or method is missing. Failed CSV: {report_path}", time.time(), order_ref),
             )
-        raise WorkerError("missing_payment_details", f"Order {order_ref}: payment amount is present but payment_date or payment_method_code is missing.")
+        raise WorkerError("missing_payment_details", f"Order {order_ref}: payment amount is present but payment_date or payment_method_code is missing. Failed CSV: {report_path}.")
     else:
         payment_state = "not_required"
 
@@ -1342,6 +1391,13 @@ def run_open_sales_order(store: Store, request_id: str, params: dict[str, Any]) 
     remaining = max(0, total - 1)
     update_job(store, request_id, kind="open_sales_live_order", state="succeeded", dataset_id=account_name,
                message=f"Open Sales order {order_ref} confirmed as Brightpearl order {order_id}.")
+    emit_event(request_id, "progress", {
+        "operation": "open_sales_live_order",
+        "percent": int(((total - remaining) / max(total, 1)) * 100),
+        "completed": total - remaining,
+        "total": total,
+        "message": f"Open Sales order {order_ref} confirmed.",
+    })
     return {
         "done": remaining == 0,
         "completed": 1,
