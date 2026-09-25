@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -218,6 +219,36 @@ fn write_worker_request(worker: &WorkerProcess, encoded: &str) -> Result<(), Str
     stdin.flush().map_err(|err| err.to_string())
 }
 
+fn cancel_marker_path(request_id: &str) -> PathBuf {
+    let safe: String = request_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == '.' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    std::env::temp_dir()
+        .join("TACOSv2-cancel")
+        .join(format!("{safe}.cancel"))
+}
+
+fn write_cancel_marker(request: &Value, fallback_id: &str) -> Result<(), String> {
+    let target_id = request
+        .get("params")
+        .and_then(Value::as_object)
+        .and_then(|params| params.get("id"))
+        .and_then(Value::as_str)
+        .unwrap_or(fallback_id);
+    let marker = cancel_marker_path(target_id);
+    if let Some(parent) = marker.parent() {
+        fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    }
+    fs::write(marker, "cancelled").map_err(|err| err.to_string())
+}
+
 fn engine_request_blocking(
     app: tauri::AppHandle,
     worker_state: Arc<Mutex<Option<WorkerProcess>>>,
@@ -240,6 +271,7 @@ fn engine_request_blocking(
 
     let worker = worker_handles(&worker_state)?;
     if method == "cancel" {
+        write_cancel_marker(&request, &request_id)?;
         write_worker_request(&worker, &encoded)?;
         return Ok(json!({
             "ok": true,

@@ -432,8 +432,8 @@ export default function App() {
 
   async function cancelInventoryReferences() {
     const activeId = inventoryReferenceActiveRequestId || inventoryReferenceRequestId.current;
-    if (activeId) await engine("cancel", { id: activeId });
     setSyncProgress((current) => current ? { ...current, message: "Cancellation requested. The current safe checkpoint will finish first." } : current);
+    if (activeId) await engine("cancel", { id: activeId });
   }
 
   async function chooseSource() {
@@ -578,8 +578,8 @@ export default function App() {
   async function cancelOpenSales() {
     const activeId = openSalesActiveRequestId || openSalesRequestId.current;
     cancelOpenSalesRequested.current = true;
-    if (activeId) await engine("cancel", { id: activeId });
     setOpenSalesProgress((current) => current ? { ...current, message: "Cancellation requested. The current safe checkpoint will finish first." } : current);
+    if (activeId) await engine("cancel", { id: activeId });
   }
 
   async function chooseOpenPurchasesSource() {
@@ -708,8 +708,8 @@ export default function App() {
   async function cancelOpenPurchases() {
     const activeId = openPurchasesActiveRequestId || openPurchasesRequestId.current;
     cancelOpenPurchasesRequested.current = true;
-    if (activeId) await engine("cancel", { id: activeId });
     setOpenPurchasesProgress((current) => current ? { ...current, message: "Cancellation requested. The current safe checkpoint will finish first." } : current);
+    if (activeId) await engine("cancel", { id: activeId });
   }
 
   async function validateSource() {

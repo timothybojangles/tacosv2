@@ -278,13 +278,35 @@ cancelled: set[str] = set()
 cancel_lock = threading.Lock()
 
 
+def cancel_marker_path(request_id: str) -> Path:
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", request_id)
+    directory = Path(tempfile.gettempdir()) / "TACOSv2-cancel"
+    return directory / f"{safe}.cancel"
+
+
+def mark_cancelled(request_id: str) -> None:
+    with cancel_lock:
+        cancelled.add(request_id)
+    marker = cancel_marker_path(request_id)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(str(time.time()), encoding="utf-8")
+
+
 class RequestCancelToken:
     def __init__(self, request_id: str):
         self.request_id = request_id
 
     def is_set(self) -> bool:
         with cancel_lock:
-            return self.request_id in cancelled
+            if self.request_id in cancelled:
+                return True
+        return cancel_marker_path(self.request_id).exists()
+
+
+def clear_cancel_marker(request_id: str) -> None:
+    with cancel_lock:
+        cancelled.discard(request_id)
+    cancel_marker_path(request_id).unlink(missing_ok=True)
 
 
 def app_store() -> Store:
@@ -2542,6 +2564,8 @@ def check_cancel(request_id: str) -> None:
     with cancel_lock:
         if request_id in cancelled:
             raise WorkerError("cancelled", "The job was cancelled.")
+    if cancel_marker_path(request_id).exists():
+        raise WorkerError("cancelled", "The job was cancelled.")
 
 
 def update_job(store: Store, job_id: str, **values: Any) -> None:
@@ -2775,8 +2799,7 @@ def handle(store: Store, request: dict[str, Any]) -> None:
         elif method == "jobHistory":
             succeed(request_id, job_history(store))
         elif method == "cancel":
-            with cancel_lock:
-                cancelled.add(str(params.get("id", request_id)))
+            mark_cancelled(str(params.get("id", request_id)))
             succeed(request_id, {"cancelled": True})
         elif method == "shutdown":
             succeed(request_id, {"shutdown": True})
