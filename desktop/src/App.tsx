@@ -49,6 +49,7 @@ type Account = {
 type PreviewRow = Record<string, unknown>;
 
 type AppSettings = Record<string, string | number>;
+type ProgressState = { percent: number; completed?: number; total?: number; message?: string };
 
 type LegacyOperation = {
   id: string;
@@ -153,7 +154,7 @@ export default function App() {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
-  const [syncProgress, setSyncProgress] = useState<{ percent: number; completed?: number; total?: number; message?: string } | null>(null);
+  const [syncProgress, setSyncProgress] = useState<ProgressState | null>(null);
   const [legacyOperations, setLegacyOperations] = useState<LegacyOperation[]>([]);
   const [legacyCategories, setLegacyCategories] = useState<string[]>([]);
   const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
@@ -169,17 +170,19 @@ export default function App() {
   const [openSalesPreview, setOpenSalesPreview] = useState<any>(null);
   const [openSalesConfirm, setOpenSalesConfirm] = useState("");
   const [openSalesLiveStatus, setOpenSalesLiveStatus] = useState<any>(null);
-  const [openSalesProgress, setOpenSalesProgress] = useState<{ percent: number; completed?: number; total?: number; message?: string } | null>(null);
+  const [openSalesProgress, setOpenSalesProgress] = useState<ProgressState | null>(null);
   const [openSalesActiveRequestId, setOpenSalesActiveRequestId] = useState("");
   const openSalesRequestId = useRef<string | null>(null);
+  const cancelOpenSalesRequested = useRef(false);
   const [openPurchasesPath, setOpenPurchasesPath] = useState("");
   const [openPurchasesValidation, setOpenPurchasesValidation] = useState<any>(null);
   const [openPurchasesPreview, setOpenPurchasesPreview] = useState<any>(null);
   const [openPurchasesConfirm, setOpenPurchasesConfirm] = useState("");
   const [openPurchasesLiveStatus, setOpenPurchasesLiveStatus] = useState<any>(null);
-  const [openPurchasesProgress, setOpenPurchasesProgress] = useState<{ percent: number; completed?: number; total?: number; message?: string } | null>(null);
+  const [openPurchasesProgress, setOpenPurchasesProgress] = useState<ProgressState | null>(null);
   const [openPurchasesActiveRequestId, setOpenPurchasesActiveRequestId] = useState("");
   const openPurchasesRequestId = useRef<string | null>(null);
+  const cancelOpenPurchasesRequested = useRef(false);
 
   const activeAccount = accounts.find((account) => account.accountName === activeAccountName) || null;
   const counts = activeAccount?.referenceCounts || emptyCounts();
@@ -452,9 +455,14 @@ export default function App() {
   async function runOpenSalesLive() {
     if (!activeAccountName || openSalesConfirm !== activeAccountName) return;
     const accountName = activeAccountName;
+    cancelOpenSalesRequested.current = false;
     setOpenSalesProgress({ percent: 0, message: "Starting Open Sales sync..." });
     await run("runOpenSales", async () => {
       for (;;) {
+        if (cancelOpenSalesRequested.current) {
+          setOpenSalesProgress((current) => current ? { ...current, message: "Sync cancelled. Remaining staged orders were not sent." } : current);
+          break;
+        }
         let result: any;
         const activeId = requestId("runOpenSalesOrder");
         openSalesRequestId.current = activeId;
@@ -495,8 +503,8 @@ export default function App() {
 
   async function cancelOpenSales() {
     const activeId = openSalesActiveRequestId || openSalesRequestId.current;
-    if (!activeId) return;
-    await engine("cancel", { id: activeId });
+    cancelOpenSalesRequested.current = true;
+    if (activeId) await engine("cancel", { id: activeId });
     setOpenSalesProgress((current) => current ? { ...current, message: "Cancellation requested. The current safe checkpoint will finish first." } : current);
   }
 
@@ -581,9 +589,14 @@ export default function App() {
   async function runOpenPurchasesLive() {
     if (!activeAccountName || openPurchasesConfirm !== activeAccountName) return;
     const accountName = activeAccountName;
+    cancelOpenPurchasesRequested.current = false;
     setOpenPurchasesProgress({ percent: 0, message: "Starting Open Purchases sync..." });
     await run("runOpenPurchases", async () => {
       for (;;) {
+        if (cancelOpenPurchasesRequested.current) {
+          setOpenPurchasesProgress((current) => current ? { ...current, message: "Sync cancelled. Remaining staged orders were not sent." } : current);
+          break;
+        }
         let result: any;
         const activeId = requestId("runOpenPurchasesOrder");
         openPurchasesRequestId.current = activeId;
@@ -620,8 +633,8 @@ export default function App() {
 
   async function cancelOpenPurchases() {
     const activeId = openPurchasesActiveRequestId || openPurchasesRequestId.current;
-    if (!activeId) return;
-    await engine("cancel", { id: activeId });
+    cancelOpenPurchasesRequested.current = true;
+    if (activeId) await engine("cancel", { id: activeId });
     setOpenPurchasesProgress((current) => current ? { ...current, message: "Cancellation requested. The current safe checkpoint will finish first." } : current);
   }
 
@@ -782,6 +795,35 @@ export default function App() {
     setEnvironment(result);
   }
 
+  function renderProgress(
+    progress: ProgressState | null,
+    unit: string,
+    options: { canCancel?: boolean; onCancel?: () => void; cancelBusy?: boolean } = {},
+  ) {
+    if (!progress) return null;
+    const percent = Math.max(0, Math.min(100, Math.round(progress.percent || 0)));
+    const total = progress.total || 0;
+    const completed = progress.completed || 0;
+    return (
+      <div className="syncProgress" aria-live="polite">
+        <div className="progressTrack"><span style={{ width: `${percent}%` }} /></div>
+        <div className="progressMeta">
+          <span>
+            <strong>{percent}%</strong>
+            {total ? ` (${completed.toLocaleString()} of ${total.toLocaleString()} ${unit})` : ""}
+          </span>
+          {options.canCancel && options.onCancel && (
+            <button className="progressCancel" onClick={options.onCancel} disabled={!!options.cancelBusy}>
+              <AlertTriangle size={16} />
+              Cancel
+            </button>
+          )}
+        </div>
+        {progress.message && <small>{progress.message}</small>}
+      </div>
+    );
+  }
+
   return (
     <main className={appearanceClass(appSettings)}>
       <aside className="sidebar">
@@ -905,13 +947,7 @@ export default function App() {
                 {busy === "syncReferences" ? <Loader2 className="spin" size={18} /> : <RefreshCw size={18} />}
                 Sync required data
               </button>
-              {syncProgress && (
-                <div className="syncProgress" aria-live="polite">
-                  <div className="progressTrack"><span style={{ width: `${syncProgress.percent}%` }} /></div>
-                  <span>{syncProgress.percent}%{syncProgress.total ? ` (${syncProgress.completed?.toLocaleString()} of ${syncProgress.total.toLocaleString()} products)` : ""}</span>
-                  {syncProgress.message && <small>{syncProgress.message}</small>}
-                </div>
-              )}
+              {renderProgress(syncProgress, "products")}
             </section>
             <section className="step stepSource">
               <div className="stepHeading"><span className="stepIndex">3</span><h2>Source</h2></div>
@@ -1079,22 +1115,11 @@ export default function App() {
                 </button>
               </section>
             </div>
-            {openSalesProgress && (
-              <div className="syncProgress" aria-live="polite">
-                <div className="progressTrack"><span style={{ width: `${openSalesProgress.percent}%` }} /></div>
-                <span>
-                  {openSalesProgress.percent}%
-                  {openSalesProgress.total ? ` (${openSalesProgress.completed?.toLocaleString() || 0} of ${openSalesProgress.total.toLocaleString()} orders)` : ""}
-                </span>
-                {openSalesProgress.message && <small>{openSalesProgress.message}</small>}
-                {openSalesActiveRequestId && (
-                  <button onClick={cancelOpenSales} disabled={busy === "cancelOpenSales"}>
-                    <AlertTriangle size={18} />
-                    Cancel
-                  </button>
-                )}
-              </div>
-            )}
+            {renderProgress(openSalesProgress, "orders", {
+              canCancel: busy === "runOpenSales" || !!openSalesActiveRequestId,
+              onCancel: cancelOpenSales,
+              cancelBusy: busy === "cancelOpenSales",
+            })}
             {openSalesValidation?.referenceCounts && (
               <div className="counts wideCounts">
                 {Object.entries(openSalesValidation.referenceCounts).map(([key, value]) => (
@@ -1217,22 +1242,11 @@ export default function App() {
                 </button>
               </section>
             </div>
-            {openPurchasesProgress && (
-              <div className="syncProgress" aria-live="polite">
-                <div className="progressTrack"><span style={{ width: `${openPurchasesProgress.percent}%` }} /></div>
-                <span>
-                  {openPurchasesProgress.percent}%
-                  {openPurchasesProgress.total ? ` (${openPurchasesProgress.completed?.toLocaleString() || 0} of ${openPurchasesProgress.total.toLocaleString()} orders)` : ""}
-                </span>
-                {openPurchasesProgress.message && <small>{openPurchasesProgress.message}</small>}
-                {openPurchasesActiveRequestId && (
-                  <button onClick={cancelOpenPurchases} disabled={busy === "cancelOpenPurchases"}>
-                    <AlertTriangle size={18} />
-                    Cancel
-                  </button>
-                )}
-              </div>
-            )}
+            {renderProgress(openPurchasesProgress, "orders", {
+              canCancel: busy === "runOpenPurchases" || !!openPurchasesActiveRequestId,
+              onCancel: cancelOpenPurchases,
+              cancelBusy: busy === "cancelOpenPurchases",
+            })}
             {openPurchasesValidation?.referenceCounts && (
               <div className="counts wideCounts">
                 {Object.entries(openPurchasesValidation.referenceCounts).map(([key, value]) => (

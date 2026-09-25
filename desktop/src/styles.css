@@ -268,6 +268,27 @@ h2 {
   font-size: 13px;
 }
 
+.progressMeta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 34px;
+}
+
+.progressMeta span {
+  min-width: 0;
+}
+
+.progressCancel {
+  min-width: 92px;
+  justify-content: center;
+  padding: 7px 10px;
+  background: #fff7ed;
+  border-color: #fdba74;
+  color: #9a3412;
+}
+
 .syncProgress small {
   overflow-wrap: anywhere;
   color: #526273;
