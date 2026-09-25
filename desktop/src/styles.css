@@ -547,17 +547,28 @@ select {
   .taskFlow {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     grid-template-areas:
-      "account refs"
+      "refs refs"
       "source source"
       "validate preview"
       "run run";
+  }
+
+  .openSalesFlow {
+    grid-template-areas:
+      "refs refs"
+      "source source"
+      "validate run";
   }
 }
 
 @media (max-width: 1060px) {
   .taskFlow {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-areas: "account" "refs" "source" "validate" "preview" "run";
+    grid-template-areas: "refs" "source" "validate" "preview" "run";
+  }
+
+  .openSalesFlow {
+    grid-template-areas: "refs" "source" "validate" "run";
   }
 }
 
