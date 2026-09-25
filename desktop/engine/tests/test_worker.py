@@ -872,6 +872,232 @@ def test_open_sales_live_passes_cancel_token_to_legacy_posts(tmp_path, monkeypat
     assert seen["payment_token"].request_id == "sales-live-cancel-token"
 
 
+def _seed_open_purchases_refs(db_path):
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript("""
+            CREATE TABLE contact_catalogue (contactId INTEGER, primaryEmail TEXT, isCustomer INTEGER, isSupplier INTEGER);
+            INSERT INTO contact_catalogue VALUES (52, 'supplier@example.com', 0, 1);
+            CREATE TABLE product_catalogue (productId INTEGER, SKU TEXT);
+            INSERT INTO product_catalogue VALUES (201, 'SKU-PO');
+            CREATE TABLE ref_warehouses (warehouseId INTEGER, name TEXT);
+            INSERT INTO ref_warehouses VALUES (1, 'Main');
+            CREATE TABLE ref_channels (channelId INTEGER, code TEXT, name TEXT);
+            INSERT INTO ref_channels VALUES (2, 'WEB', 'Web');
+            CREATE TABLE ref_price_lists (priceListId INTEGER, code TEXT, name TEXT);
+            INSERT INTO ref_price_lists VALUES (3, 'GBP', 'GBP Cost');
+            CREATE TABLE ref_currencies (isoCode TEXT);
+            INSERT INTO ref_currencies VALUES ('GBP');
+            CREATE TABLE ref_shipping_methods (shippingMethodId INTEGER, code TEXT, name TEXT);
+            INSERT INTO ref_shipping_methods VALUES (4, 'STD', 'Standard');
+            CREATE TABLE ref_payment_methods (code TEXT);
+            INSERT INTO ref_payment_methods VALUES ('BACS');
+            CREATE TABLE ref_order_statuses (statusId INTEGER, code TEXT, name TEXT, rawJson TEXT);
+            INSERT INTO ref_order_statuses VALUES (5, 'NEW', 'New', '{"orderTypeCode":"PO"}');
+        """)
+
+
+def _open_purchases_csv(path):
+    path.write_text(
+        "\n".join([
+            "order_ref,price_list,placed_on,order_status,delivery_date,shipping_method,currency,exchangeRate,payment_amount,payment_date,payment_ref,payment_method_code,supplier_email,warehouseId,channel,sku,quantity,row_net,row_tax,tax_code,nominal_code,item_name",
+            "PO-1,GBP,01/09/2026,NEW,02/09/2026,STD,GBP,1,12.00,01/09/2026,PAY-1,BACS,supplier@example.com,1,WEB,SKU-PO,2,10.00,2.00,T20,,Widget",
+        ]),
+        encoding="utf-8",
+    )
+
+
+def test_open_purchases_validation_stages_orders_and_preview(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("TACOS_CREDENTIAL_BACKEND", "sqlite_plaintext")
+    monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))
+    store = app_store()
+    handle(store, _request("saveAccount", {"accountName": "demo", "appRef": "app", "token": "secret", "region": "euw1"}, "save-1"))
+    capsys.readouterr()
+    db_path = worker.account_data_db(store, "demo")
+    _seed_open_purchases_refs(db_path)
+    source = tmp_path / "open-purchases.csv"
+    _open_purchases_csv(source)
+
+    handle(store, _request("validateOpenPurchasesFile", {"accountName": "demo", "path": str(source)}, "purchases-validate"))
+    result = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
+    assert result["orders"] == 1
+    assert result["rows"] == 1
+    assert result["preview"]["orders"] == 1
+    assert result["preview"]["payments"] == 1
+    assert result["preview"]["executionStatus"]["state"] == "checkpointed"
+
+    handle(store, _request("previewOpenPurchasesRun", {"accountName": "demo"}, "purchases-preview"))
+    preview = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
+    assert preview["previewOrders"][0]["orderRef"] == "PO-1"
+    assert preview["referenceCounts"]["suppliers"] == 1
+    assert preview["referenceCounts"]["validatedOrders"] == 1
+
+
+def test_open_purchases_template_and_reference_sync_parity(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("TACOS_CREDENTIAL_BACKEND", "sqlite_plaintext")
+    monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))
+    store = app_store()
+    handle(store, _request("saveAccount", {"accountName": "demo", "appRef": "app", "token": "secret", "region": "euw1"}, "save-1"))
+    capsys.readouterr()
+
+    template = tmp_path / "bp_purchases_import.csv"
+    handle(store, _request("saveOpenPurchasesTemplate", {"destination": str(template)}, "purchases-template"))
+    result = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
+    with template.open(encoding="utf-8", newline="") as file:
+        headers = next(csv.reader(file))
+    assert result["headers"] == headers
+    assert headers[:3] == ["order_ref", "price_list", "placed_on"]
+
+    def reference_sync(*args, **kwargs):
+        with sqlite3.connect(args[3]) as conn:
+            conn.execute("CREATE TABLE ref_channels (channelId INTEGER)")
+            conn.execute("INSERT INTO ref_channels VALUES (1)")
+        return {"channels": 1}
+
+    def contacts_sync(*args, **kwargs):
+        with sqlite3.connect(args[1]) as conn:
+            conn.execute("CREATE TABLE contact_catalogue (contactId INTEGER, isSupplier INTEGER)")
+            conn.execute("INSERT INTO contact_catalogue VALUES (2, 1)")
+        return 1
+
+    def products_sync(*args, **kwargs):
+        with sqlite3.connect(args[1]) as conn:
+            conn.execute("CREATE TABLE product_catalogue (productId INTEGER)")
+            conn.execute("INSERT INTO product_catalogue VALUES (3)")
+        return 1
+
+    with (
+        patch.object(worker, "fetch_and_store_reference_tables", side_effect=reference_sync) as refs,
+        patch.object(worker, "update_contact_catalogue", side_effect=contacts_sync) as contacts,
+        patch.object(worker, "update_product_catalogue", side_effect=products_sync) as products,
+    ):
+        handle(store, _request("syncOpenPurchasesReferences", {"accountName": "demo", "mode": "all"}, "purchases-refs"))
+    sync = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
+    refs.assert_called_once()
+    contacts.assert_called_once()
+    products.assert_called_once()
+    assert sync["results"] == {"reference": {"channels": 1}, "contacts": 1, "products": 1}
+    assert sync["referenceCounts"]["channels"] == 1
+    assert sync["referenceCounts"]["suppliers"] == 1
+    assert sync["referenceCounts"]["products"] == 1
+
+
+def test_open_purchases_live_posts_rows_and_payment(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("TACOS_CREDENTIAL_BACKEND", "sqlite_plaintext")
+    monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))
+    store = app_store()
+    handle(store, _request("saveAccount", {"accountName": "demo", "appRef": "app", "token": "secret", "region": "euw1"}, "save-1"))
+    capsys.readouterr()
+    db_path = worker.account_data_db(store, "demo")
+    _seed_open_purchases_refs(db_path)
+    source = tmp_path / "paid-open-purchases.csv"
+    _open_purchases_csv(source)
+    handle(store, _request("validateOpenPurchasesFile", {"accountName": "demo", "path": str(source)}, "purchases-validate-paid"))
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])["result"]["preview"]["payments"] == 1
+
+    with (
+        patch.object(worker, "post_purchase_order", return_value=(True, 3001)),
+        patch.object(worker, "post_purchase_row", return_value=(True, None)) as post_row,
+        patch.object(worker, "post_purchase_payment", return_value=(True, {"response": 4001})) as post_payment,
+    ):
+        handle(store, _request("runOpenPurchasesOrder", {"accountName": "demo", "confirmAccountName": "demo"}, "purchases-live-paid"))
+    result = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
+    assert result["paymentState"] == "succeeded"
+    post_row.assert_called_once()
+    post_payment.assert_called_once()
+    assert post_payment.call_args.args[2]["orderId"] == 3001
+
+
+def test_open_purchases_live_retry_reuses_saved_order_id_and_suppresses_stdout(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("TACOS_CREDENTIAL_BACKEND", "sqlite_plaintext")
+    monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))
+    store = app_store()
+    handle(store, _request("saveAccount", {"accountName": "demo", "appRef": "app", "token": "secret", "region": "euw1"}, "save-1"))
+    capsys.readouterr()
+    db_path = worker.account_data_db(store, "demo")
+    _seed_open_purchases_refs(db_path)
+    source = tmp_path / "retry-open-purchases.csv"
+    _open_purchases_csv(source)
+    handle(store, _request("validateOpenPurchasesFile", {"accountName": "demo", "path": str(source)}, "purchases-validate-retry"))
+    capsys.readouterr()
+
+    with (
+        patch.object(worker, "post_purchase_order", return_value=(True, 3002)) as create_order,
+        patch.object(worker, "post_purchase_row", return_value=(True, None)),
+        patch.object(worker, "post_purchase_payment", return_value=(False, None)),
+    ):
+        handle(store, _request("runOpenPurchasesOrder", {"accountName": "demo", "confirmAccountName": "demo"}, "purchases-live-1"))
+    failed = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert failed["error"]["code"] == "write_uncertain"
+    create_order.assert_called_once()
+
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT orderId FROM validated_purchase_orders").fetchone()[0] == 3002
+
+    def noisy_payment(*args, **kwargs):
+        print("PURCHASE PAYMENT raw legacy line")
+        return True, {"response": 1}
+
+    with (
+        patch.object(worker, "post_purchase_order") as create_order_again,
+        patch.object(worker, "post_purchase_row", return_value=(True, None)) as post_row_again,
+        patch.object(worker, "post_purchase_payment", side_effect=noisy_payment),
+    ):
+        handle(store, _request("runOpenPurchasesOrder", {"accountName": "demo", "confirmAccountName": "demo"}, "purchases-live-2"))
+    lines = capsys.readouterr().out.splitlines()
+    create_order_again.assert_not_called()
+    post_row_again.assert_not_called()
+    assert all("raw legacy line" not in line for line in lines)
+    result = json.loads(lines[-1])["result"]
+    assert result["orderId"] == 3002
+    assert result["paymentState"] == "succeeded"
+
+
+def test_open_purchases_reference_sync_honors_cancel_and_live_passes_cancel_tokens(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("TACOS_CREDENTIAL_BACKEND", "sqlite_plaintext")
+    monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))
+    store = app_store()
+    handle(store, _request("saveAccount", {"accountName": "demo", "appRef": "app", "token": "secret", "region": "euw1"}, "save-1"))
+    capsys.readouterr()
+    handle(store, _request("cancel", {"id": "purchases-refs-cancel"}, "cancel-purchases-refs"))
+    capsys.readouterr()
+    with patch.object(worker, "fetch_and_store_reference_tables") as refs:
+        handle(store, _request("syncOpenPurchasesReferences", {"accountName": "demo", "mode": "reference"}, "purchases-refs-cancel"))
+    response = json.loads(capsys.readouterr().out.splitlines()[-1])
+    refs.assert_not_called()
+    assert response["error"]["code"] == "cancelled"
+
+    db_path = worker.account_data_db(store, "demo")
+    _seed_open_purchases_refs(db_path)
+    source = tmp_path / "cancel-token-open-purchases.csv"
+    _open_purchases_csv(source)
+    handle(store, _request("validateOpenPurchasesFile", {"accountName": "demo", "path": str(source)}, "purchases-validate-cancel-token"))
+    capsys.readouterr()
+    seen = {}
+
+    def order_post(*args, **kwargs):
+        seen["order_token"] = kwargs.get("cancel_token")
+        return True, 3003
+
+    def row_post(*args, **kwargs):
+        seen["row_token"] = kwargs.get("cancel_token")
+        return True, None
+
+    def payment_post(*args, **kwargs):
+        seen["payment_token"] = kwargs.get("cancel_token")
+        return True, {"response": 1}
+
+    with (
+        patch.object(worker, "post_purchase_order", side_effect=order_post),
+        patch.object(worker, "post_purchase_row", side_effect=row_post),
+        patch.object(worker, "post_purchase_payment", side_effect=payment_post),
+    ):
+        handle(store, _request("runOpenPurchasesOrder", {"accountName": "demo", "confirmAccountName": "demo"}, "purchases-live-cancel-token"))
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])["ok"] is True
+    assert seen["order_token"].request_id == "purchases-live-cancel-token"
+    assert seen["row_token"].request_id == "purchases-live-cancel-token"
+    assert seen["payment_token"].request_id == "purchases-live-cancel-token"
+
+
 def test_inventory_validation_uses_account_price_list_and_blank_option(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("TACOS_CREDENTIAL_BACKEND", "sqlite_plaintext")
     monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))

@@ -50,6 +50,12 @@ from validator_sales_orders import (
     TEMPLATE_HEADERS as SALES_TEMPLATE_HEADERS,
     validate_sales_orders,
 )
+from validator_open_purchases import (
+    ORDERS_TABLE as PURCHASE_ORDERS_TABLE,
+    ROWS_TABLE as PURCHASE_ROWS_TABLE,
+    TEMPLATE_HEADERS as PURCHASE_TEMPLATE_HEADERS,
+    validate_open_purchases,
+)
 from sync_sales_orders import (
     build_bp_order_payload as build_sales_order_payload,
     build_bp_payment_payload as build_sales_payment_payload,
@@ -57,6 +63,16 @@ from sync_sales_orders import (
     post_order as post_sales_order,
     post_payment as post_sales_payment,
     update_order_id as update_sales_order_id,
+)
+from sync_open_purchases import (
+    build_order_payload as build_purchase_order_payload,
+    build_row_payload as build_purchase_row_payload,
+    build_bp_payment_payload as build_purchase_payment_payload,
+    load_validated_orders as load_validated_purchase_orders,
+    post_order as post_purchase_order,
+    post_row as post_purchase_row,
+    post_payment as post_purchase_payment,
+    update_order_id as update_purchase_order_id,
 )
 
 PROTOCOL_VERSION = 1
@@ -98,7 +114,7 @@ LEGACY_OPERATIONS: list[dict[str, Any]] = [
         "label": "Open Purchases",
         "category": "Go Live",
         "legacyView": "open_purchases",
-        "status": "foundation",
+        "status": "active",
         "legacyModules": ["validator_open_purchases.py", "sync_open_purchases.py"],
         "apiFamilies": ["Order POST", "Purchase order rows", "Purchase payments"],
         "workflow": ["Validate purchase groups", "Create purchase orders", "Add rows", "Checkpoint payments"],
@@ -496,6 +512,35 @@ def sales_reference_counts(db_path: Path) -> dict[str, int]:
         for key, table in tables.items():
             try:
                 result[key] = int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+            except sqlite3.OperationalError:
+                result[key] = 0
+    return result
+
+
+def purchase_reference_counts(db_path: Path) -> dict[str, int]:
+    tables = {
+        "suppliers": "contact_catalogue",
+        "products": "product_catalogue",
+        "warehouses": "ref_warehouses",
+        "channels": "ref_channels",
+        "priceLists": "ref_price_lists",
+        "currencies": "ref_currencies",
+        "shippingMethods": "ref_shipping_methods",
+        "paymentMethods": "ref_payment_methods",
+        "orderStatuses": "ref_order_statuses",
+        "validatedOrders": PURCHASE_ORDERS_TABLE,
+        "validatedRows": PURCHASE_ROWS_TABLE,
+    }
+    result = {key: 0 for key in tables}
+    with sqlite3.connect(db_path) as conn:
+        for key, table in tables.items():
+            try:
+                if key == "suppliers":
+                    result[key] = int(conn.execute(
+                        f"SELECT COUNT(*) FROM {table} WHERE COALESCE(isSupplier, 0) = 1"
+                    ).fetchone()[0])
+                else:
+                    result[key] = int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
             except sqlite3.OperationalError:
                 result[key] = 0
     return result
@@ -1430,6 +1475,447 @@ def run_open_sales_order(store: Store, request_id: str, params: dict[str, Any]) 
     }
 
 
+def open_purchases_preview(db_path: Path, limit: int = 25) -> dict[str, Any]:
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            totals = conn.execute(
+                f"""
+                SELECT
+                    COUNT(*) AS orders,
+                    COALESCE(SUM(CASE WHEN payment_amount IS NOT NULL THEN 1 ELSE 0 END), 0) AS payments,
+                    COALESCE(SUM(payment_amount), 0) AS paymentTotal
+                FROM {PURCHASE_ORDERS_TABLE}
+                """
+            ).fetchone()
+            row_count = int(conn.execute(f"SELECT COUNT(*) FROM {PURCHASE_ROWS_TABLE}").fetchone()[0])
+            orders = [dict(row) for row in conn.execute(
+                f"""
+                SELECT
+                    o.order_ref AS orderRef,
+                    o.contactId,
+                    o.placed_on AS placedOn,
+                    o.warehouseId,
+                    o.channelId,
+                    o.statusId,
+                    o.currency,
+                    o.priceListId,
+                    o.payment_amount AS paymentAmount,
+                    o.payment_method_code AS paymentMethodCode,
+                    COUNT(r.id) AS rows,
+                    COALESCE(SUM(r.row_net), 0) AS netTotal,
+                    COALESCE(SUM(r.row_tax), 0) AS taxTotal
+                FROM {PURCHASE_ORDERS_TABLE} o
+                LEFT JOIN {PURCHASE_ROWS_TABLE} r ON r.order_ref = o.order_ref
+                GROUP BY o.id
+                ORDER BY o.id
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()]
+            lines = [dict(row) for row in conn.execute(
+                f"""
+                SELECT order_ref AS orderRef, line_number AS lineNumber, sku,
+                    item_name AS itemName, quantity, row_net AS net, row_tax AS tax,
+                    productId, rowType
+                FROM {PURCHASE_ROWS_TABLE}
+                ORDER BY order_ref, line_number
+                LIMIT ?
+                """,
+                (limit * 4,),
+            ).fetchall()]
+        return {
+            "orders": int(totals["orders"] or 0) if totals else 0,
+            "rows": row_count,
+            "payments": int(totals["payments"] or 0) if totals else 0,
+            "paymentTotal": float(totals["paymentTotal"] or 0) if totals else 0.0,
+            "previewOrders": orders,
+            "previewRows": lines,
+            "executionStatus": {
+                "state": "checkpointed",
+                "message": "Live Open Purchases posting uses checkpoints: saved PO ids are reused and row/payment failures do not recreate orders.",
+            },
+        }
+    except sqlite3.OperationalError:
+        return {
+            "orders": 0,
+            "rows": 0,
+            "payments": 0,
+            "paymentTotal": 0.0,
+            "previewOrders": [],
+            "previewRows": [],
+            "executionStatus": {
+                "state": "not_validated",
+                "message": "Validate an Open Purchases file before previewing staged purchase orders.",
+            },
+        }
+
+
+def validate_open_purchases_file(store: Store, request_id: str, params: dict[str, Any]) -> dict[str, Any]:
+    account_name = normalize_account_name(params.get("accountName"))
+    check_cancel(request_id)
+    account_meta = account_summary_without_secret(store, account_name)
+    path = Path(str(params.get("path", ""))).expanduser()
+    if not path.exists() or not path.is_file():
+        raise WorkerError("source_missing", "Choose an existing local CSV or XLSX file.")
+    if path.suffix.lower() not in {".csv", ".xlsx"}:
+        raise WorkerError("unsupported_source", "Open Purchases accepts CSV or XLSX files.")
+    db_path = account_data_db(store, account_name)
+    credentials = read_credential(account_name)
+    if credentials:
+        prepare_legacy_credentials(store, account_name, credentials, account_meta.get("baseCurrency"))
+    update_job(store, request_id, kind="open_purchases_validation", state="running", source_path=str(path), dataset_id=account_name)
+    emit_event(request_id, "progress", {"operation": "open_purchases_validation", "percent": 0, "message": "Starting Open Purchases validation."})
+    logs: list[str] = []
+
+    def worker_log(message: str) -> None:
+        logs.append(str(message))
+        if len(logs) > 100:
+            del logs[: len(logs) - 100]
+
+    with legacy_operation(store):
+        orders, rows = validate_open_purchases(str(path), str(db_path), account_name, log_callback=worker_log)
+    check_cancel(request_id)
+
+    preview = open_purchases_preview(db_path)
+    references = purchase_reference_counts(db_path)
+    update_job(
+        store,
+        request_id,
+        kind="open_purchases_validation",
+        state="succeeded" if orders > 0 else "succeeded_with_warnings",
+        message=f"Validated {orders} purchase order(s) and {rows} row(s). Checkpointed live posting is available.",
+    )
+    emit_event(request_id, "progress", {"operation": "open_purchases_validation", "percent": 100, "message": f"Validated {orders} purchase order(s) and {rows} row(s)."})
+    return {
+        "validationJobId": request_id,
+        "orders": orders,
+        "rows": rows,
+        "referenceCounts": references,
+        "logs": logs,
+        "preview": preview,
+    }
+
+
+def preview_open_purchases_run(store: Store, request_id: str, params: dict[str, Any]) -> dict[str, Any]:
+    account_name = normalize_account_name(params.get("accountName"))
+    account_summary_without_secret(store, account_name)
+    db_path = account_data_db(store, account_name)
+    preview = open_purchases_preview(db_path)
+    update_job(
+        store,
+        request_id,
+        kind="open_purchases_preview",
+        state="succeeded" if preview["orders"] else "succeeded_with_warnings",
+        dataset_id=account_name,
+        message=f"Previewed {preview['orders']} staged Open Purchases order(s).",
+    )
+    return {"accountName": account_name, **preview, "referenceCounts": purchase_reference_counts(db_path)}
+
+
+def save_open_purchases_template(store: Store, params: dict[str, Any]) -> dict[str, Any]:
+    destination = Path(str(params.get("destination", ""))).expanduser().resolve()
+    if destination.suffix.lower() not in {".csv", ".xlsx"} or not destination.parent.is_dir():
+        raise WorkerError("invalid_destination", "Choose a CSV or XLSX destination in an existing folder.")
+    with legacy_cwd(store):
+        with open_table(str(destination), mode="w", newline="") as file:
+            writer = csv.writer(file)
+            writer.writerow(PURCHASE_TEMPLATE_HEADERS)
+    return {"path": str(destination), "headers": PURCHASE_TEMPLATE_HEADERS}
+
+
+def write_open_purchases_failed_csv(store: Store, account_name: str, order: dict[str, Any], filename_tag: str, rows: list[dict[str, Any]] | None = None) -> Path:
+    reports_dir = store.accounts / account_name / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    path = reports_dir / f"{account_name}_{filename_tag}_{int(time.time())}.csv"
+    source_rows = rows if rows is not None else order.get("rows", [])
+    output_rows = []
+    headers: list[str] = []
+    for row in source_rows:
+        try:
+            original = json.loads(row.get("original_row_json") or "{}")
+        except (TypeError, ValueError):
+            original = {"order_ref": order.get("order_ref")}
+        for key in original:
+            if key not in headers:
+                headers.append(key)
+        output_rows.append(original)
+    if not headers:
+        headers = list(order.get("source_headers") or ["order_ref"])
+        output_rows = [{"order_ref": order.get("order_ref")}]
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=headers, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(output_rows)
+    return path
+
+
+def sync_open_purchases_references(store: Store, request_id: str, params: dict[str, Any]) -> dict[str, Any]:
+    account_name = normalize_account_name(params.get("accountName"))
+    cancel_token = RequestCancelToken(request_id)
+    mode = str(params.get("mode") or "all").strip()
+    if mode not in {"all", "reference", "contacts", "products"}:
+        raise WorkerError("invalid_options", "Choose all, reference, contacts or products for Open Purchases sync.")
+    credentials = credentials_for_account(store, account_name)
+    db_path = account_data_db(store, account_name)
+    prepare_legacy_credentials(store, account_name, credentials, account_summary_without_secret(store, account_name).get("baseCurrency"))
+    update_job(store, request_id, kind="open_purchases_reference_sync", state="running", source_path=mode, dataset_id=account_name)
+    emit_event(request_id, "progress", {"operation": "open_purchases_reference_sync", "percent": 0, "message": "Starting Open Purchases reference sync."})
+    logs: list[str] = []
+
+    def worker_log(message: str) -> None:
+        text = str(message)
+        logs.append(text)
+        if len(logs) > 100:
+            del logs[: len(logs) - 100]
+        if text.startswith("PROGRESS:"):
+            try:
+                percent = max(0, min(100, int(text.split(":", 1)[1])))
+            except (IndexError, ValueError):
+                percent = None
+            event: dict[str, Any] = {"operation": "open_purchases_reference_sync", "message": text}
+            if percent is not None:
+                event["percent"] = percent
+            emit_event(request_id, "progress", event)
+
+    results: dict[str, Any] = {}
+    with legacy_operation(store):
+        if mode in {"all", "reference"}:
+            check_cancel(request_id)
+            emit_event(request_id, "progress", {"operation": "open_purchases_reference_sync", "percent": 10, "message": "Syncing Open Purchases reference data."})
+            results["reference"] = fetch_and_store_reference_tables(
+                account_name,
+                credentials.region,
+                credentials.headers,
+                str(db_path),
+                log_callback=worker_log,
+                cancel_token=cancel_token,
+            )
+        if mode in {"all", "contacts"}:
+            check_cancel(request_id)
+            emit_event(request_id, "progress", {"operation": "open_purchases_reference_sync", "percent": 34, "message": "Syncing supplier contacts."})
+            results["contacts"] = update_contact_catalogue(account_name, str(db_path), log_callback=worker_log, cancel_token=cancel_token)
+        if mode in {"all", "products"}:
+            check_cancel(request_id)
+            emit_event(request_id, "progress", {"operation": "open_purchases_reference_sync", "percent": 67, "message": "Syncing product references."})
+            results["products"] = update_product_catalogue(account_name, str(db_path), log_callback=worker_log, cancel_token=cancel_token)
+    check_cancel(request_id)
+
+    emit_event(request_id, "progress", {"operation": "open_purchases_reference_sync", "percent": 100, "message": "Open Purchases reference sync complete."})
+    update_job(store, request_id, kind="open_purchases_reference_sync", state="succeeded", message="Open Purchases reference sync complete.")
+    return {
+        "accountName": account_name,
+        "mode": mode,
+        "results": results,
+        "referenceCounts": purchase_reference_counts(db_path),
+        "logs": compact_logs(logs),
+    }
+
+
+def ensure_open_purchases_live_tables(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS open_purchases_live_orders (
+            order_ref TEXT PRIMARY KEY,
+            order_id INTEGER,
+            state TEXT NOT NULL,
+            rows_state TEXT,
+            payment_state TEXT,
+            error TEXT,
+            updated_at REAL NOT NULL
+        )
+        """
+    )
+
+
+def open_purchases_live_status(store: Store, params: dict[str, Any]) -> dict[str, Any]:
+    account_name = normalize_account_name(params.get("accountName"))
+    db_path = account_data_db(store, account_name)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        ensure_open_purchases_live_tables(conn)
+        rows = conn.execute(
+            "SELECT order_ref, order_id, state, rows_state, payment_state, error, updated_at "
+            "FROM open_purchases_live_orders ORDER BY updated_at DESC LIMIT 100"
+        ).fetchall()
+        try:
+            remaining = int(conn.execute(
+                f"SELECT COUNT(*) FROM {PURCHASE_ORDERS_TABLE} WHERE {unprocessed_where_clause()}"
+            ).fetchone()[0])
+        except sqlite3.OperationalError:
+            remaining = 0
+    return {"orders": [dict(row) for row in rows], "remaining": remaining}
+
+
+def run_open_purchases_order(store: Store, request_id: str, params: dict[str, Any]) -> dict[str, Any]:
+    account_name = normalize_account_name(params.get("accountName"))
+    cancel_token = RequestCancelToken(request_id)
+    confirm = normalize_account_name(params.get("confirmAccountName"))
+    if confirm != account_name:
+        raise WorkerError("confirmation_required", "Type the account name exactly before sending Open Purchases orders.")
+    credentials = credentials_for_account(store, account_name)
+    db_path = account_data_db(store, account_name)
+    prepare_legacy_credentials(store, account_name, credentials, account_summary_without_secret(store, account_name).get("baseCurrency"))
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        ensure_open_purchases_live_tables(conn)
+        uncertain = conn.execute(
+            "SELECT order_ref FROM open_purchases_live_orders WHERE state = 'unknown' LIMIT 1"
+        ).fetchone()
+        if uncertain:
+            raise WorkerError("reconciliation_required", f"Purchase order {uncertain['order_ref']} has an uncertain outcome. Reconcile it in Brightpearl before continuing.")
+
+    with legacy_operation(store):
+        orders = load_validated_purchase_orders(str(db_path))
+    check_cancel(request_id)
+    total = len(orders)
+    if total == 0:
+        return {"done": True, "completed": 0, "remaining": 0, "total": 0, "waitMs": 0}
+    order = orders[0]
+    order_ref = str(order["order_ref"])
+
+    update_job(store, request_id, kind="open_purchases_live_order", state="running", dataset_id=account_name,
+               message=f"Sending Open Purchases order {order_ref}.")
+    emit_event(request_id, "progress", {
+        "operation": "open_purchases_live_order",
+        "percent": int(((total - len(orders)) / max(total, 1)) * 100),
+        "completed": max(0, total - len(orders)),
+        "total": total,
+        "message": f"Sending Open Purchases order {order_ref}.",
+    })
+    order_url = f"https://{credentials.region}.brightpearlconnect.com/public-api/{account_name}/order-service/order"
+    row_url_template = f"https://{credentials.region}.brightpearlconnect.com/public-api/{account_name}/order-service/order/{{order_id}}/row"
+    payment_url = (
+        f"https://{credentials.region}.brightpearlconnect.com/public-api/{account_name}/"
+        "accounting-service/supplier-payment"
+    )
+    headers = {**credentials.headers, "Content-Type": "application/json"}
+    order_id = order.get("orderId")
+
+    with sqlite3.connect(db_path) as conn:
+        ensure_open_purchases_live_tables(conn)
+        conn.execute(
+            "INSERT INTO open_purchases_live_orders (order_ref, order_id, state, rows_state, payment_state, error, updated_at) "
+            "VALUES (?, ?, 'running', NULL, NULL, NULL, ?) "
+            "ON CONFLICT(order_ref) DO UPDATE SET state = 'running', error = NULL, updated_at = excluded.updated_at",
+            (order_ref, order_id, time.time()),
+        )
+        checkpoint = conn.execute(
+            "SELECT rows_state FROM open_purchases_live_orders WHERE order_ref = ?",
+            (order_ref,),
+        ).fetchone()
+        rows_state = checkpoint[0] if checkpoint else None
+
+    if not order_id:
+        payload = build_purchase_order_payload(order)
+        with legacy_operation(store):
+            ok, created_id = post_purchase_order(order_url, headers, payload, cancel_token=cancel_token)
+        if not ok or not created_id:
+            report_path = write_open_purchases_failed_csv(store, account_name, order, "failed_purchase_orders")
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    "UPDATE open_purchases_live_orders SET state = 'unknown', error = ?, updated_at = ? WHERE order_ref = ?",
+                    (f"Purchase order creation was not confirmed by Brightpearl. Failed CSV: {report_path}", time.time(), order_ref),
+                )
+            raise WorkerError("write_uncertain", f"Purchase order {order_ref}: Brightpearl creation was not confirmed. Failed CSV: {report_path}. Reconcile before retrying.")
+        order_id = int(created_id)
+        update_purchase_order_id(str(db_path), order_ref, order_id)
+        order["orderId"] = order_id
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE open_purchases_live_orders SET order_id = ?, state = 'order_created', updated_at = ? WHERE order_ref = ?",
+                (order_id, time.time(), order_ref),
+            )
+        check_cancel(request_id)
+
+    row_url = row_url_template.format(order_id=order_id)
+    failed_rows: list[dict[str, Any]] = []
+    if rows_state != "succeeded":
+        for row in order.get("rows", []):
+            payload = build_purchase_row_payload(row)
+            with legacy_operation(store):
+                ok_row, _ = post_purchase_row(row_url, headers, payload, cancel_token=cancel_token)
+            if not ok_row:
+                failed_rows.append(row)
+            check_cancel(request_id)
+    if failed_rows:
+        report_path = write_open_purchases_failed_csv(store, account_name, order, "failed_purchase_order_rows", failed_rows)
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE open_purchases_live_orders SET state = 'row_failed', rows_state = 'failed', error = ?, updated_at = ? WHERE order_ref = ?",
+                (f"One or more rows failed. The order id is saved; retry will reuse it. Failed CSV: {report_path}", time.time(), order_ref),
+            )
+        raise WorkerError("write_uncertain", f"Purchase order {order_ref}: one or more rows failed. The order id {order_id} is saved; retry will not recreate the order. Failed CSV: {report_path}.")
+    if rows_state != "succeeded":
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE open_purchases_live_orders SET rows_state = 'succeeded', updated_at = ? WHERE order_ref = ?",
+                (time.time(), order_ref),
+            )
+
+    try:
+        payment_required = float(order.get("payment_amount") or 0) > 0
+    except (TypeError, ValueError):
+        payment_required = False
+    if payment_required and order.get("payment_method_code") and order.get("payment_date"):
+        payment_payload = build_purchase_payment_payload(order_id, order)
+        with legacy_operation(store):
+            ok, _ = post_purchase_payment(payment_url, headers, payment_payload, cancel_token=cancel_token)
+        if not ok:
+            report_path = write_open_purchases_failed_csv(store, account_name, order, "failed_purchase_order_payments")
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    "UPDATE open_purchases_live_orders SET state = 'payment_failed', payment_state = 'failed', error = ?, updated_at = ? WHERE order_ref = ?",
+                    (f"Payment failed. The order id is saved; retry will reuse it. Failed CSV: {report_path}", time.time(), order_ref),
+                )
+            raise WorkerError("write_uncertain", f"Purchase order {order_ref}: payment failed. The order id {order_id} is saved; retry will not recreate the order. Failed CSV: {report_path}.")
+        payment_state = "succeeded"
+    elif payment_required:
+        report_path = write_open_purchases_failed_csv(store, account_name, order, "failed_purchase_order_payments")
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE open_purchases_live_orders SET state = 'payment_failed', payment_state = 'missing_details', error = ?, updated_at = ? WHERE order_ref = ?",
+                (f"Payment amount is present but payment date or method is missing. Failed CSV: {report_path}", time.time(), order_ref),
+            )
+        raise WorkerError("missing_payment_details", f"Purchase order {order_ref}: payment amount is present but payment_date or payment_method_code is missing. Failed CSV: {report_path}.")
+    else:
+        payment_state = "not_required"
+
+    with sqlite3.connect(db_path) as conn:
+        marked = mark_rows_processed(conn, PURCHASE_ORDERS_TABLE, order["id"], f"Created purchase order {order_id}")
+        if marked != 1:
+            conn.execute(
+                "UPDATE open_purchases_live_orders SET state = 'unknown', error = ?, updated_at = ? WHERE order_ref = ?",
+                ("Brightpearl accepted the purchase order but local completion failed.", time.time(), order_ref),
+            )
+            raise WorkerError("reconciliation_required", f"Purchase order {order_ref}: Brightpearl accepted the order but local completion failed.")
+        conn.execute(
+            "UPDATE open_purchases_live_orders SET state = 'succeeded', rows_state = 'succeeded', payment_state = ?, error = NULL, updated_at = ? WHERE order_ref = ?",
+            (payment_state, time.time(), order_ref),
+        )
+    remaining = max(0, total - 1)
+    update_job(store, request_id, kind="open_purchases_live_order", state="succeeded", dataset_id=account_name,
+               message=f"Open Purchases order {order_ref} confirmed as Brightpearl order {order_id}.")
+    emit_event(request_id, "progress", {
+        "operation": "open_purchases_live_order",
+        "percent": int(((total - remaining) / max(total, 1)) * 100),
+        "completed": total - remaining,
+        "total": total,
+        "message": f"Open Purchases order {order_ref} confirmed.",
+    })
+    return {
+        "done": remaining == 0,
+        "completed": 1,
+        "remaining": remaining,
+        "total": total,
+        "orderRef": order_ref,
+        "orderId": order_id,
+        "paymentState": payment_state,
+        "waitMs": 500,
+    }
+
+
 def current_inventory_validation(store: Store, account_name: str, validation_id: str) -> tuple[str, Path, int]:
     with sqlite3.connect(store.ledger) as conn:
         latest = conn.execute(
@@ -2216,6 +2702,18 @@ def handle(store: Store, request: dict[str, Any]) -> None:
             succeed(request_id, run_open_sales_order(store, request_id, params))
         elif method == "openSalesLiveStatus":
             succeed(request_id, open_sales_live_status(store, params))
+        elif method == "validateOpenPurchasesFile":
+            succeed(request_id, validate_open_purchases_file(store, request_id, params))
+        elif method == "previewOpenPurchasesRun":
+            succeed(request_id, preview_open_purchases_run(store, request_id, params))
+        elif method == "saveOpenPurchasesTemplate":
+            succeed(request_id, save_open_purchases_template(store, params))
+        elif method == "syncOpenPurchasesReferences":
+            succeed(request_id, sync_open_purchases_references(store, request_id, params))
+        elif method == "runOpenPurchasesOrder":
+            succeed(request_id, run_open_purchases_order(store, request_id, params))
+        elif method == "openPurchasesLiveStatus":
+            succeed(request_id, open_purchases_live_status(store, params))
         elif method == "inventoryPriceLists":
             succeed(request_id, inventory_price_lists(store, params))
         elif method == "previewInventoryRun":

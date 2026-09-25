@@ -47,9 +47,9 @@ def _log(message: str) -> None:
     bp_log(f"[Open Purchases Sync] {message}", _LOG_CALLBACK)
 
 
-def _sleep_with_log(ms: int) -> None:
-    _log(f"⏳ Sleeping for {ms} ms due to throttling…")
-    sleep_with_cancel_ms(ms)
+def _sleep_with_log(ms: int, *, cancel_token=None) -> None:
+    _log(f"Sleeping for {ms} ms due to throttling.")
+    sleep_with_cancel_ms(ms, cancel_token=cancel_token)
 
 
 def load_validated_orders(db_path):
@@ -210,13 +210,15 @@ def build_order_payload(order):
     return _strip_nones(payload)
 
 
-def post_order(url, headers, payload):
+def post_order(url, headers, payload, *, cancel_token=None):
     max_retries, default_sleep_ms = get_upload_retry_settings()
     for attempt in range(1, max_retries + 1):
+        if cancel_token and cancel_token.is_set():
+            raise RuntimeError("Operation cancelled.")
         try:
             resp = requests.post(url, json=payload, headers=headers, verify=False)
             log_payload_exchange("POST", url, payload, resp, _LOG_CALLBACK)
-            _log(f"ORDER POST attempt {attempt} → {resp.status_code}")
+            _log(f"ORDER POST attempt {attempt} -> {resp.status_code}")
             if resp.status_code == 200:
                 record_api_update(estimate_record_count(payload))
                 data = {}
@@ -236,19 +238,19 @@ def post_order(url, headers, payload):
                 rem = int(resp.headers.get("brightpearl-requests-remaining", 3))
                 thr = int(resp.headers.get("brightpearl-next-throttle-period", 0))
                 if rem <= get_settings().throttle_threshold and thr > 0:
-                    _sleep_with_log(thr)
+                    _sleep_with_log(thr, cancel_token=cancel_token)
                 else:
-                    sleep_with_cancel_ms(default_sleep_ms)
+                    sleep_with_cancel_ms(default_sleep_ms, cancel_token=cancel_token)
 
                 if created_id:
                     return True, created_id
                 else:
-                    _log(f"⚠️ 200 OK but no order id in body: {str(data)[:300]}")
+                    _log(f"200 OK but no order id in body: {str(data)[:300]}")
             else:
-                _log(f"❌ Order {resp.status_code}: {resp.text[:500]}")
+                _log(f"Order {resp.status_code}: {resp.text[:500]}")
         except requests.RequestException as e:
-            _log(f"❌ Order request error: {e}")
-        sleep_with_cancel_ms(default_sleep_ms * attempt)
+            _log(f"Order request error: {e}")
+        sleep_with_cancel_ms(default_sleep_ms * attempt, cancel_token=cancel_token)
     return False, None
 
 
@@ -284,27 +286,29 @@ def build_row_payload(row):
     return _strip_nones(payload)
 
 
-def post_row(url, headers, payload):
+def post_row(url, headers, payload, *, cancel_token=None):
     max_retries, default_sleep_ms = get_upload_retry_settings()
     for attempt in range(1, max_retries + 1):
+        if cancel_token and cancel_token.is_set():
+            raise RuntimeError("Operation cancelled.")
         try:
             resp = requests.post(url, json=payload, headers=headers, verify=False)
             log_payload_exchange("POST", url, payload, resp, _LOG_CALLBACK)
-            _log(f"ROW POST attempt {attempt} → {resp.status_code}")
+            _log(f"ROW POST attempt {attempt} -> {resp.status_code}")
             if resp.status_code == 200:
                 record_api_update(estimate_record_count(payload))
                 rem = int(resp.headers.get("brightpearl-requests-remaining", 3))
                 thr = int(resp.headers.get("brightpearl-next-throttle-period", 0))
                 if rem <= get_settings().throttle_threshold and thr > 0:
-                    _sleep_with_log(thr)
+                    _sleep_with_log(thr, cancel_token=cancel_token)
                 else:
-                    sleep_with_cancel_ms(default_sleep_ms)
+                    sleep_with_cancel_ms(default_sleep_ms, cancel_token=cancel_token)
                 return True, None
             else:
-                _log(f"❌ Row {resp.status_code}: {resp.text[:500]}")
+                _log(f"Row {resp.status_code}: {resp.text[:500]}")
         except requests.RequestException as e:
-            _log(f"❌ Row request error: {e}")
-        sleep_with_cancel_ms(default_sleep_ms * attempt)
+            _log(f"Row request error: {e}")
+        sleep_with_cancel_ms(default_sleep_ms * attempt, cancel_token=cancel_token)
     return False, None
 
 
@@ -327,27 +331,29 @@ def build_bp_payment_payload(order_id, order):
     }
 
 
-def post_payment(url, headers, payload):
+def post_payment(url, headers, payload, *, cancel_token=None):
     max_retries, default_sleep_ms = get_upload_retry_settings()
     for attempt in range(1, max_retries + 1):
+        if cancel_token and cancel_token.is_set():
+            raise RuntimeError("Operation cancelled.")
         try:
             resp = requests.post(url, json=payload, headers=headers, verify=False)
             log_payload_exchange("POST", url, payload, resp, _LOG_CALLBACK)
-            _log(f"PAYMENT POST {url} attempt {attempt} → {resp.status_code}")
+            _log(f"PAYMENT POST {url} attempt {attempt} -> {resp.status_code}")
             if resp.status_code == 200:
                 record_api_update(estimate_record_count(payload))
                 rem = int(resp.headers.get("brightpearl-requests-remaining", 3))
                 thr = int(resp.headers.get("brightpearl-next-throttle-period", 0))
                 if rem <= get_settings().throttle_threshold and thr > 0:
-                    _sleep_with_log(thr)
+                    _sleep_with_log(thr, cancel_token=cancel_token)
                 else:
-                    sleep_with_cancel_ms(default_sleep_ms)
+                    sleep_with_cancel_ms(default_sleep_ms, cancel_token=cancel_token)
                 return True, (resp.json() if "application/json" in resp.headers.get("Content-Type", "") else resp.text)
             else:
-                _log(f"❌ Payment {resp.status_code}: {resp.text[:500]}")
+                _log(f"Payment {resp.status_code}: {resp.text[:500]}")
         except requests.RequestException as e:
-            _log(f"❌ Payment request error: {e}")
-        sleep_with_cancel_ms(default_sleep_ms * attempt)
+            _log(f"Payment request error: {e}")
+        sleep_with_cancel_ms(default_sleep_ms * attempt, cancel_token=cancel_token)
     return False, None
 
 
@@ -393,7 +399,7 @@ def write_failed_csv(account_name, failed_groups, filename_tag):
                     total += 1
                 except Exception:
                     pass
-    _log(f"⚠️ Wrote {total} rows to {out_path}")
+    _log(f"Wrote {total} rows to {out_path}")
 
 
 def main(account_name, db_path, *, log_callback: LogCallback = None, progress_callback: Optional[Callable[[int, int], None]] = None):

@@ -65,6 +65,7 @@ const tabs = [
   { id: "accounts", label: "Accounts", icon: KeyRound },
   { id: "tasks", label: "Inventory", icon: FileSpreadsheet },
   { id: "openSales", label: "Open Sales", icon: ShoppingCart },
+  { id: "openPurchases", label: "Open Purchases", icon: ShoppingCart },
   { id: "legacy", label: "Legacy Tools", icon: CheckCircle2 },
   { id: "data", label: "Data", icon: Database },
   { id: "history", label: "Job History", icon: History },
@@ -171,6 +172,14 @@ export default function App() {
   const [openSalesProgress, setOpenSalesProgress] = useState<{ percent: number; completed?: number; total?: number; message?: string } | null>(null);
   const [openSalesActiveRequestId, setOpenSalesActiveRequestId] = useState("");
   const openSalesRequestId = useRef<string | null>(null);
+  const [openPurchasesPath, setOpenPurchasesPath] = useState("");
+  const [openPurchasesValidation, setOpenPurchasesValidation] = useState<any>(null);
+  const [openPurchasesPreview, setOpenPurchasesPreview] = useState<any>(null);
+  const [openPurchasesConfirm, setOpenPurchasesConfirm] = useState("");
+  const [openPurchasesLiveStatus, setOpenPurchasesLiveStatus] = useState<any>(null);
+  const [openPurchasesProgress, setOpenPurchasesProgress] = useState<{ percent: number; completed?: number; total?: number; message?: string } | null>(null);
+  const [openPurchasesActiveRequestId, setOpenPurchasesActiveRequestId] = useState("");
+  const openPurchasesRequestId = useRef<string | null>(null);
 
   const activeAccount = accounts.find((account) => account.accountName === activeAccountName) || null;
   const counts = activeAccount?.referenceCounts || emptyCounts();
@@ -205,13 +214,23 @@ export default function App() {
     });
     const unlistenEngine = listen<any>("engine-event", ({ payload }) => {
       const data = payload?.data;
-      if (!data || !String(data.operation || "").startsWith("open_sales_")) return;
-      setOpenSalesProgress((current) => ({
+      const operation = String(data?.operation || "");
+      if (operation.startsWith("open_sales_")) {
+        setOpenSalesProgress((current) => ({
+          percent: typeof data.percent === "number" ? data.percent : current?.percent || 0,
+          completed: data.completed ?? current?.completed,
+          total: data.total ?? current?.total,
+          message: data.message || current?.message,
+        }));
+      }
+      if (operation.startsWith("open_purchases_")) {
+        setOpenPurchasesProgress((current) => ({
         percent: typeof data.percent === "number" ? data.percent : current?.percent || 0,
         completed: data.completed ?? current?.completed,
         total: data.total ?? current?.total,
         message: data.message || current?.message,
-      }));
+        }));
+      }
     });
     return () => {
       void unlisten.then((stop) => stop());
@@ -228,6 +247,11 @@ export default function App() {
     setOpenSalesConfirm("");
     setOpenSalesLiveStatus(null);
     setOpenSalesProgress(null);
+    setOpenPurchasesValidation(null);
+    setOpenPurchasesPreview(null);
+    setOpenPurchasesConfirm("");
+    setOpenPurchasesLiveStatus(null);
+    setOpenPurchasesProgress(null);
     setLiveConfirm("");
     setLiveProgress(null);
     setLiveBatches([]);
@@ -258,6 +282,9 @@ export default function App() {
     void engine("openSalesLiveStatus", { accountName: activeAccountName })
       .then((result) => { if (current) setOpenSalesLiveStatus(result); })
       .catch(() => { if (current) setOpenSalesLiveStatus(null); });
+    void engine("openPurchasesLiveStatus", { accountName: activeAccountName })
+      .then((result) => { if (current) setOpenPurchasesLiveStatus(result); })
+      .catch(() => { if (current) setOpenPurchasesLiveStatus(null); });
     return () => { current = false; };
   }, [activeAccountName]);
 
@@ -467,6 +494,131 @@ export default function App() {
     if (!activeId) return;
     await engine("cancel", { id: activeId });
     setOpenSalesProgress((current) => current ? { ...current, message: "Cancellation requested. The current safe checkpoint will finish first." } : current);
+  }
+
+  async function chooseOpenPurchasesSource() {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "Open Purchases source", extensions: ["csv", "xlsx"] }],
+    });
+    if (typeof selected === "string") {
+      setOpenPurchasesPath(selected);
+      setOpenPurchasesValidation(null);
+      setOpenPurchasesPreview(null);
+    }
+  }
+
+  async function validateOpenPurchasesSource() {
+    if (!activeAccountName || !openPurchasesPath) return;
+    setOpenPurchasesProgress({ percent: 0, message: "Starting Open Purchases validation..." });
+    await run("validateOpenPurchases", async () => {
+      const activeId = requestId("validateOpenPurchases");
+      openPurchasesRequestId.current = activeId;
+      setOpenPurchasesActiveRequestId(activeId);
+      let result: any;
+      try {
+        result = await engine("validateOpenPurchasesFile", {
+          accountName: activeAccountName,
+          path: openPurchasesPath,
+        }, activeId);
+      } finally {
+        openPurchasesRequestId.current = null;
+        setOpenPurchasesActiveRequestId("");
+      }
+      setOpenPurchasesValidation(result);
+      setOpenPurchasesPreview(result.preview);
+      setOpenPurchasesProgress({ percent: 100, completed: result.orders, total: result.orders, message: "Open Purchases validation complete." });
+      setMessage(`Open Purchases validation complete: ${result.orders} purchase order(s), ${result.rows} row(s) staged.`);
+    });
+  }
+
+  async function saveOpenPurchasesTemplate() {
+    const destination = await save({
+      defaultPath: "bp_purchases_import.csv",
+      filters: [{ name: "Spreadsheet files", extensions: ["csv", "xlsx"] }],
+    });
+    if (typeof destination !== "string") return;
+    await run("saveOpenPurchasesTemplate", async () => {
+      const result = await engine("saveOpenPurchasesTemplate", { destination });
+      setMessage(`Open Purchases template saved to ${result.path}.`);
+    });
+  }
+
+  async function syncOpenPurchasesReferences(mode: "all" | "reference" | "contacts" | "products") {
+    if (!activeAccountName) return;
+    setOpenPurchasesProgress({ percent: 0, message: `Starting Open Purchases ${mode === "all" ? "sync all" : mode}...` });
+    await run(`syncOpenPurchases-${mode}`, async () => {
+      const activeId = requestId(`syncOpenPurchases-${mode}`);
+      openPurchasesRequestId.current = activeId;
+      setOpenPurchasesActiveRequestId(activeId);
+      let result: any;
+      try {
+        result = await engine("syncOpenPurchasesReferences", { accountName: activeAccountName, mode }, activeId);
+      } finally {
+        openPurchasesRequestId.current = null;
+        setOpenPurchasesActiveRequestId("");
+      }
+      setOpenPurchasesValidation((current: any) => current ? { ...current, referenceCounts: result.referenceCounts, logs: result.logs } : { referenceCounts: result.referenceCounts, logs: result.logs });
+      await refreshAccounts(activeAccountName);
+      setOpenPurchasesProgress({ percent: 100, message: "Open Purchases reference sync complete." });
+      setMessage(`Open Purchases ${mode === "all" ? "sync all" : mode} complete.`);
+    });
+  }
+
+  async function refreshOpenPurchasesPreview() {
+    if (!activeAccountName) return;
+    await run("previewOpenPurchases", async () => {
+      const result = await engine("previewOpenPurchasesRun", { accountName: activeAccountName });
+      setOpenPurchasesPreview(result);
+      setMessage(`Open Purchases preview loaded: ${result.orders} staged purchase order(s).`);
+    });
+  }
+
+  async function runOpenPurchasesLive() {
+    if (!activeAccountName || openPurchasesConfirm !== activeAccountName) return;
+    const accountName = activeAccountName;
+    setOpenPurchasesProgress({ percent: 0, message: "Starting Open Purchases sync..." });
+    await run("runOpenPurchases", async () => {
+      for (;;) {
+        let result: any;
+        const activeId = requestId("runOpenPurchasesOrder");
+        openPurchasesRequestId.current = activeId;
+        setOpenPurchasesActiveRequestId(activeId);
+        try {
+          result = await engine("runOpenPurchasesOrder", {
+            accountName,
+            confirmAccountName: openPurchasesConfirm,
+          }, activeId);
+          openPurchasesRequestId.current = null;
+          setOpenPurchasesActiveRequestId("");
+        } catch (err) {
+          openPurchasesRequestId.current = null;
+          setOpenPurchasesActiveRequestId("");
+          const status = await engine("openPurchasesLiveStatus", { accountName });
+          setOpenPurchasesLiveStatus(status);
+          throw err;
+        }
+        const status = await engine("openPurchasesLiveStatus", { accountName });
+        setOpenPurchasesLiveStatus(status);
+        const completed = Math.max(0, (result.total || 0) - (result.remaining || 0));
+        setOpenPurchasesProgress({
+          percent: result.total ? Math.round((completed / result.total) * 100) : 100,
+          completed,
+          total: result.total,
+          message: `Confirmed ${result.orderRef}.`,
+        });
+        setMessage(`Open Purchases order ${result.orderRef} confirmed as Brightpearl order ${result.orderId}.`);
+        if (result.done) break;
+        await new Promise((resolve) => setTimeout(resolve, result.waitMs || 500));
+      }
+    });
+  }
+
+  async function cancelOpenPurchases() {
+    const activeId = openPurchasesActiveRequestId || openPurchasesRequestId.current;
+    if (!activeId) return;
+    await engine("cancel", { id: activeId });
+    setOpenPurchasesProgress((current) => current ? { ...current, message: "Cancellation requested. The current safe checkpoint will finish first." } : current);
   }
 
   async function validateSource() {
@@ -844,6 +996,12 @@ export default function App() {
                           Open sales workflow
                         </button>
                       )}
+                      {operation.id === "open_purchases" && (
+                        <button onClick={() => setActiveTab("openPurchases")}>
+                          <ShoppingCart size={18} />
+                          Open purchases workflow
+                        </button>
+                      )}
                     </article>
                   ))}
                   {!legacyOperations.filter((operation) => operation.category === category).length && (
@@ -983,6 +1141,145 @@ export default function App() {
                       <div key={`${order.order_ref}-${order.updated_at}`}>
                         {order.order_ref}: {order.state}
                         {order.order_id ? `, order ${order.order_id}` : ""}
+                        {order.payment_state ? `, payment ${order.payment_state}` : ""}
+                        {order.error ? `, ${order.error}` : ""}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
+        )}
+
+        {activeTab === "openPurchases" && (
+          <section className="panel">
+            <div className="resultHeader">
+              <div>
+                <h2>Open Purchases</h2>
+                <p>Validate legacy Open Purchases files against supplier, product and order references, then post checkpointed POs to Brightpearl.</p>
+              </div>
+              <button onClick={refreshOpenPurchasesPreview} disabled={!!busy || !activeAccountName}>
+                {busy === "previewOpenPurchases" ? <Loader2 className="spin" size={18} /> : <FileSearch size={18} />}
+                Refresh preview
+              </button>
+            </div>
+            <div className="taskFlow openSalesFlow">
+              <section className="step stepAccount">
+                <div className="stepHeading"><span className="stepIndex">1</span><h2>Account</h2></div>
+                <p>{activeAccountName ? `Using ${activeAccountName}.` : "Choose an account first."}</p>
+              </section>
+              <section className="step stepRefs">
+                <div className="stepHeading"><span className="stepIndex">2</span><h2>References</h2></div>
+                <div className="toolbar">
+                  <button onClick={() => syncOpenPurchasesReferences("all")} disabled={!!busy || !activeAccountName}>
+                    {busy === "syncOpenPurchases-all" ? <Loader2 className="spin" size={18} /> : <RefreshCw size={18} />}
+                    Sync all
+                  </button>
+                  <button onClick={() => syncOpenPurchasesReferences("reference")} disabled={!!busy || !activeAccountName}>Reference data</button>
+                  <button onClick={() => syncOpenPurchasesReferences("contacts")} disabled={!!busy || !activeAccountName}>Contact refs</button>
+                  <button onClick={() => syncOpenPurchasesReferences("products")} disabled={!!busy || !activeAccountName}>Product refs</button>
+                </div>
+              </section>
+              <section className="step stepSource">
+                <div className="stepHeading"><span className="stepIndex">3</span><h2>Source</h2></div>
+                <div className="sourceRow">
+                  <input value={openPurchasesPath} readOnly placeholder="Choose Open Purchases CSV/XLSX" />
+                  <button onClick={saveOpenPurchasesTemplate} disabled={!!busy}>
+                    <Download size={18} />
+                    Template
+                  </button>
+                  <button onClick={chooseOpenPurchasesSource} disabled={!!busy}>
+                    <FolderOpen size={18} />
+                    Choose
+                  </button>
+                </div>
+              </section>
+              <section className="step stepValidate">
+                <div className="stepHeading"><span className="stepIndex">4</span><h2>Validate</h2></div>
+                <p>Checks suppliers, products, warehouses, channels, price lists, statuses, currencies, shipping and payments.</p>
+                <button onClick={validateOpenPurchasesSource} disabled={!!busy || !activeAccountName || !openPurchasesPath}>
+                  {busy === "validateOpenPurchases" ? <Loader2 className="spin" size={18} /> : <FileSearch size={18} />}
+                  Validate Open Purchases
+                </button>
+              </section>
+              <section className="step stepRun">
+                <div className="stepHeading"><span className="stepIndex">5</span><h2>Sync to Brightpearl</h2></div>
+                <p>Creates one PO at a time, saves the Brightpearl order id before rows and payment, and stops for reconciliation if the outcome is uncertain.</p>
+                <input aria-label="Confirm account name for Open Purchases sync" placeholder="Type account name" value={openPurchasesConfirm} disabled={!!busy} onChange={(event) => setOpenPurchasesConfirm(event.target.value)} />
+                <button onClick={runOpenPurchasesLive} disabled={!!busy || !openPurchasesPreview?.orders || openPurchasesConfirm !== activeAccountName}>
+                  {busy === "runOpenPurchases" ? <Loader2 className="spin" size={18} /> : <CheckCircle2 size={18} />}
+                  Sync POs
+                </button>
+              </section>
+            </div>
+            {openPurchasesProgress && (
+              <div className="syncProgress" aria-live="polite">
+                <div className="progressTrack"><span style={{ width: `${openPurchasesProgress.percent}%` }} /></div>
+                <span>
+                  {openPurchasesProgress.percent}%
+                  {openPurchasesProgress.total ? ` (${openPurchasesProgress.completed?.toLocaleString() || 0} of ${openPurchasesProgress.total.toLocaleString()} orders)` : ""}
+                </span>
+                {openPurchasesProgress.message && <small>{openPurchasesProgress.message}</small>}
+                {openPurchasesActiveRequestId && (
+                  <button onClick={cancelOpenPurchases} disabled={busy === "cancelOpenPurchases"}>
+                    <AlertTriangle size={18} />
+                    Cancel
+                  </button>
+                )}
+              </div>
+            )}
+            {openPurchasesValidation?.referenceCounts && (
+              <div className="counts wideCounts">
+                {Object.entries(openPurchasesValidation.referenceCounts).map(([key, value]) => (
+                  <span key={key}>{key}<strong>{String(value)}</strong></span>
+                ))}
+              </div>
+            )}
+            {openPurchasesPreview && (
+              <div className="runPreview">
+                <div className="resultHeader">
+                  <div>
+                    <h2>Staged Open Purchases preview</h2>
+                    <p>{openPurchasesPreview.orders} order(s), {openPurchasesPreview.rows} row(s), {openPurchasesPreview.payments} payment(s), payment total {openPurchasesPreview.paymentTotal}.</p>
+                  </div>
+                  <span className="jobState state-running">Checkpoint required</span>
+                </div>
+                <div className="tableWrap compactTable">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Order ref</th><th>Rows</th><th>Supplier</th><th>Placed</th><th>Currency</th><th>Net</th><th>Tax</th><th>Payment</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(openPurchasesPreview.previewOrders || []).map((order: any) => (
+                        <tr key={order.orderRef}>
+                          <td>{order.orderRef}</td>
+                          <td>{order.rows}</td>
+                          <td>{order.contactId}</td>
+                          <td>{order.placedOn}</td>
+                          <td>{order.currency}</td>
+                          <td>{order.netTotal}</td>
+                          <td>{order.taxTotal}</td>
+                          <td>{order.paymentAmount ?? ""}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {!(openPurchasesPreview.previewOrders || []).length && <p className="empty">No staged Open Purchases orders yet.</p>}
+                </div>
+                {!!openPurchasesValidation?.logs?.length && (
+                  <pre>{openPurchasesValidation.logs.join("\n")}</pre>
+                )}
+                {openPurchasesLiveStatus?.orders?.length > 0 && (
+                  <div className="liveBatchStatus">
+                    <strong>Recent Open Purchases checkpoints</strong>
+                    {openPurchasesLiveStatus.orders.slice(0, 10).map((order: any) => (
+                      <div key={`${order.order_ref}-${order.updated_at}`}>
+                        {order.order_ref}: {order.state}
+                        {order.order_id ? `, order ${order.order_id}` : ""}
+                        {order.rows_state ? `, rows ${order.rows_state}` : ""}
                         {order.payment_state ? `, payment ${order.payment_state}` : ""}
                         {order.error ? `, ${order.error}` : ""}
                       </div>
