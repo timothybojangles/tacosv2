@@ -195,6 +195,24 @@ export default function App() {
     const row = tableRows[0];
     return row ? Object.keys(row) : [];
   }, [tableRows]);
+  const openSalesProgressMessage = String(openSalesProgress?.message || "");
+  const showOpenSalesReferenceProgress = !!openSalesProgress && (
+    busy.startsWith("syncOpenSales")
+    || /Open Sales reference|contact references|product references|reference data/i.test(openSalesProgressMessage)
+  );
+  const showOpenSalesLiveProgress = !!openSalesProgress && !showOpenSalesReferenceProgress && (
+    busy === "runOpenSales"
+    || /Open Sales sync|Confirmed|Stopped at first|Cancellation|cancelled/i.test(openSalesProgressMessage)
+  );
+  const openPurchasesProgressMessage = String(openPurchasesProgress?.message || "");
+  const showOpenPurchasesReferenceProgress = !!openPurchasesProgress && (
+    busy.startsWith("syncOpenPurchases")
+    || /Open Purchases reference|supplier contacts|product references|reference data/i.test(openPurchasesProgressMessage)
+  );
+  const showOpenPurchasesLiveProgress = !!openPurchasesProgress && !showOpenPurchasesReferenceProgress && (
+    busy === "runOpenPurchases"
+    || /Open Purchases sync|Confirmed|Stopped at first|Cancellation|cancelled/i.test(openPurchasesProgressMessage)
+  );
 
   useEffect(() => {
     void refreshAccounts();
@@ -345,11 +363,18 @@ export default function App() {
     });
   }
 
-  async function syncReferences() {
+  async function syncReferences(mode: "all" | "products" | "warehouses" | "locations" | "priceLists" = "all") {
     if (!activeAccountName) return;
-    setSyncProgress({ percent: 0, message: "Starting product catalogue sync..." });
-    await run("syncReferences", async () => {
-      const result = await engine("syncInventoryReferences", { accountName: activeAccountName });
+    const labels = {
+      all: "all required data",
+      products: "products",
+      warehouses: "warehouses",
+      locations: "locations",
+      priceLists: "price lists",
+    };
+    setSyncProgress({ percent: 0, message: `Starting ${labels[mode]} sync...` });
+    await run(`syncReferences-${mode}`, async () => {
+      const result = await engine("syncInventoryReferences", { accountName: activeAccountName, mode });
       setValidation(null);
       setRunPreview(null);
       await refreshAccounts(result.account.accountName);
@@ -358,7 +383,8 @@ export default function App() {
       setMessage(
         `Synced products ${result.results.products}, warehouses ${result.results.warehouses}, locations ${result.results.locations}, price values ${result.results.priceListValues}.`
       );
-      setSyncProgress({ percent: 100, completed: result.results.products, total: result.results.products, message: "Reference sync complete." });
+      const completed = mode === "all" || mode === "products" ? result.results.products : undefined;
+      setSyncProgress({ percent: 100, completed, total: completed, message: "Reference sync complete." });
     });
   }
 
@@ -424,7 +450,7 @@ export default function App() {
 
   async function syncOpenSalesReferences(mode: "all" | "reference" | "contacts" | "products") {
     if (!activeAccountName) return;
-    setOpenSalesProgress({ percent: 0, message: `Starting Open Sales ${mode === "all" ? "sync all" : mode}...` });
+    setOpenSalesProgress({ percent: 0, message: `Starting Open Sales reference sync: ${mode === "all" ? "all" : mode}.` });
     await run(`syncOpenSales-${mode}`, async () => {
       const activeId = requestId(`syncOpenSales-${mode}`);
       openSalesRequestId.current = activeId;
@@ -558,7 +584,7 @@ export default function App() {
 
   async function syncOpenPurchasesReferences(mode: "all" | "reference" | "contacts" | "products") {
     if (!activeAccountName) return;
-    setOpenPurchasesProgress({ percent: 0, message: `Starting Open Purchases ${mode === "all" ? "sync all" : mode}...` });
+    setOpenPurchasesProgress({ percent: 0, message: `Starting Open Purchases reference sync: ${mode === "all" ? "all" : mode}.` });
     await run(`syncOpenPurchases-${mode}`, async () => {
       const activeId = requestId(`syncOpenPurchases-${mode}`);
       openPurchasesRequestId.current = activeId;
@@ -943,10 +969,16 @@ export default function App() {
                   <span key={key}>{key}: <strong>{value}</strong></span>
                 ))}
               </div>
-              <button onClick={syncReferences} disabled={!!busy || !activeAccountName}>
-                {busy === "syncReferences" ? <Loader2 className="spin" size={18} /> : <RefreshCw size={18} />}
-                Sync required data
-              </button>
+              <div className="toolbar">
+                <button onClick={() => syncReferences("all")} disabled={!!busy || !activeAccountName}>
+                  {busy === "syncReferences-all" ? <Loader2 className="spin" size={18} /> : <RefreshCw size={18} />}
+                  Sync all
+                </button>
+                <button onClick={() => syncReferences("products")} disabled={!!busy || !activeAccountName}>Sync Products</button>
+                <button onClick={() => syncReferences("warehouses")} disabled={!!busy || !activeAccountName}>Sync Warehouses</button>
+                <button onClick={() => syncReferences("locations")} disabled={!!busy || !activeAccountName}>Sync Locations</button>
+                <button onClick={() => syncReferences("priceLists")} disabled={!!busy || !activeAccountName}>Sync Pricelists</button>
+              </div>
               {renderProgress(syncProgress, "products")}
             </section>
             <section className="step stepSource">
@@ -1082,6 +1114,7 @@ export default function App() {
                   <button onClick={() => syncOpenSalesReferences("contacts")} disabled={!!busy || !activeAccountName}>Contact refs</button>
                   <button onClick={() => syncOpenSalesReferences("products")} disabled={!!busy || !activeAccountName}>Product refs</button>
                 </div>
+                {showOpenSalesReferenceProgress && renderProgress(openSalesProgress, "records")}
               </section>
               <section className="step stepSource">
                 <div className="stepHeading"><span className="stepIndex">3</span><h2>Source</h2></div>
@@ -1115,7 +1148,7 @@ export default function App() {
                 </button>
               </section>
             </div>
-            {renderProgress(openSalesProgress, "orders", {
+            {showOpenSalesLiveProgress && renderProgress(openSalesProgress, "orders", {
               canCancel: busy === "runOpenSales" || !!openSalesActiveRequestId,
               onCancel: cancelOpenSales,
               cancelBusy: busy === "cancelOpenSales",
@@ -1209,6 +1242,7 @@ export default function App() {
                   <button onClick={() => syncOpenPurchasesReferences("contacts")} disabled={!!busy || !activeAccountName}>Contact refs</button>
                   <button onClick={() => syncOpenPurchasesReferences("products")} disabled={!!busy || !activeAccountName}>Product refs</button>
                 </div>
+                {showOpenPurchasesReferenceProgress && renderProgress(openPurchasesProgress, "records")}
               </section>
               <section className="step stepSource">
                 <div className="stepHeading"><span className="stepIndex">3</span><h2>Source</h2></div>
@@ -1242,7 +1276,7 @@ export default function App() {
                 </button>
               </section>
             </div>
-            {renderProgress(openPurchasesProgress, "orders", {
+            {showOpenPurchasesLiveProgress && renderProgress(openPurchasesProgress, "orders", {
               canCancel: busy === "runOpenPurchases" || !!openPurchasesActiveRequestId,
               onCancel: cancelOpenPurchases,
               cancelBusy: busy === "cancelOpenPurchases",
