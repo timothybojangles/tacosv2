@@ -141,8 +141,22 @@ header p,
 
 nav {
   display: grid;
-  gap: 4px;
+  gap: 12px;
   margin-top: 18px;
+}
+
+.navGroup {
+  display: grid;
+  gap: 4px;
+}
+
+.navGroupLabel {
+  padding: 0 8px 2px;
+  color: #90a0ad;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
 }
 
 nav button,
@@ -236,14 +250,13 @@ h2 {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   grid-template-areas:
-    "account refs refs"
+    "refs refs refs"
     "source source validate"
     "preview run run";
   gap: 10px;
   align-items: start;
 }
 
-.stepAccount { grid-area: account; }
 .stepRefs { grid-area: refs; }
 .stepSource { grid-area: source; }
 .stepValidate { grid-area: validate; }
@@ -256,7 +269,7 @@ h2 {
 
 .openSalesFlow {
   grid-template-areas:
-    "account refs refs"
+    "refs refs refs"
     "source source source"
     "validate validate run";
 }

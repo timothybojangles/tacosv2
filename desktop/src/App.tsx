@@ -62,18 +62,45 @@ type LegacyOperation = {
   workflow: string[];
 };
 
-const tabs = [
-  { id: "accounts", label: "Accounts", icon: KeyRound },
-  { id: "tasks", label: "Inventory", icon: FileSpreadsheet },
-  { id: "openSales", label: "Open Sales", icon: ShoppingCart },
-  { id: "openPurchases", label: "Open Purchases", icon: ShoppingCart },
-  { id: "legacy", label: "Legacy Tools", icon: CheckCircle2 },
-  { id: "data", label: "Data", icon: Database },
-  { id: "history", label: "Job History", icon: History },
-  { id: "logs", label: "Logs", icon: FileText },
-  { id: "settings", label: "Settings", icon: Settings },
-  { id: "help", label: "Help", icon: Info },
+const navGroups = [
+  {
+    label: "File",
+    tabs: [
+      { id: "accounts", label: "Accounts", icon: KeyRound },
+    ],
+  },
+  {
+    label: "Go Live Tools",
+    tabs: [
+      { id: "tasks", label: "Inventory Import", icon: FileSpreadsheet },
+      { id: "openSales", label: "Open Sales", icon: ShoppingCart },
+      { id: "openPurchases", label: "Open Purchases", icon: ShoppingCart },
+    ],
+  },
+  {
+    label: "Review",
+    tabs: [
+      { id: "data", label: "Data", icon: Database },
+      { id: "history", label: "Job History", icon: History },
+      { id: "logs", label: "Logs", icon: FileText },
+      { id: "legacy", label: "Legacy Workbench", icon: CheckCircle2 },
+    ],
+  },
+  {
+    label: "Settings",
+    tabs: [
+      { id: "settings", label: "Global Settings", icon: Settings },
+      { id: "help", label: "Help", icon: Info },
+    ],
+  },
 ];
+
+const headerDescriptions: Record<string, string> = {
+  File: "Account registration, credential checks and account removal.",
+  "Go Live Tools": "Migration workflows for reference sync, validation, previews and confirmed Brightpearl writes.",
+  Review: "Validation results, job history, logs and migration parity status.",
+  Settings: "Application settings, environment details and support information.",
+};
 
 const inventoryHeaders = ["sku", "quantity", "locationName", "costprice", "warehouseId"];
 
@@ -187,6 +214,9 @@ export default function App() {
   const activeAccount = accounts.find((account) => account.accountName === activeAccountName) || null;
   const counts = activeAccount?.referenceCounts || emptyCounts();
   const hasReferences = counts.products > 0 && counts.warehouses > 0 && counts.locations > 0;
+  const activeNavGroup = navGroups.find((group) => group.tabs.some((tab) => tab.id === activeTab));
+  const activeHeaderTitle = activeNavGroup?.label || "TACOS";
+  const activeHeaderDescription = headerDescriptions[activeHeaderTitle] || "";
 
   const tableRows = (
     resultView === "accepted" ? validation?.validatedPreview : validation?.rejectedPreview
@@ -868,33 +898,38 @@ export default function App() {
           ))}
         </select>
         <nav>
-          {tabs.map((tab) => {
-            const Icon = tab.icon;
-            return (
-              <button
-                key={tab.id}
-                className={activeTab === tab.id ? "active" : ""}
-                disabled={busy === "runLive"}
-                onClick={() => {
-                  setActiveTab(tab.id);
-                  if (tab.id === "history") void refreshHistory();
-                  if (tab.id === "logs") void loadLogs();
-                  if (tab.id === "help") void loadEnvironment();
-                }}
-              >
-                <Icon size={18} />
-                {tab.label}
-              </button>
-            );
-          })}
+          {navGroups.map((group) => (
+            <div className="navGroup" key={group.label}>
+              <span className="navGroupLabel">{group.label}</span>
+              {group.tabs.map((tab) => {
+                const Icon = tab.icon;
+                return (
+                  <button
+                    key={tab.id}
+                    className={activeTab === tab.id ? "active" : ""}
+                    disabled={busy === "runLive"}
+                    onClick={() => {
+                      setActiveTab(tab.id);
+                      if (tab.id === "history") void refreshHistory();
+                      if (tab.id === "logs") void loadLogs();
+                      if (tab.id === "help") void loadEnvironment();
+                    }}
+                  >
+                    <Icon size={18} />
+                    {tab.label}
+                  </button>
+                );
+              })}
+            </div>
+          ))}
         </nav>
       </aside>
 
       <section className="workspace">
         <header>
           <div>
-            <h1>Inventory Import</h1>
-            <p>Account-bound Brightpearl sync, local validation and confirmed stock corrections.</p>
+            <h1>{activeHeaderTitle}</h1>
+            <p>{activeHeaderDescription}</p>
           </div>
           <span className="account"><Lock size={14} /> {activeAccountName || "No active account"}</span>
         </header>
@@ -958,12 +993,8 @@ export default function App() {
 
         {activeTab === "tasks" && (
           <div className="taskFlow">
-            <section className="step stepAccount">
-              <div className="stepHeading"><span className="stepIndex">1</span><h2>Account</h2></div>
-              <p>{activeAccount ? `${activeAccount.accountName} is selected.` : "Register and select an account first."}</p>
-            </section>
             <section className="step stepRefs">
-              <div className="stepHeading"><span className="stepIndex">2</span><h2>References</h2></div>
+              <div className="stepHeading"><span className="stepIndex">1</span><h2>References</h2></div>
               <div className="counts">
                 {Object.entries(counts).map(([key, value]) => (
                   <span key={key}>{key}: <strong>{value}</strong></span>
@@ -982,7 +1013,7 @@ export default function App() {
               {renderProgress(syncProgress, "products")}
             </section>
             <section className="step stepSource">
-              <div className="stepHeading"><span className="stepIndex">3</span><h2>Source</h2></div>
+              <div className="stepHeading"><span className="stepIndex">2</span><h2>Source</h2></div>
               <p>Expected columns: {priceListId ? "sku, quantity, locationName, warehouseId" : inventoryHeaders.join(", ")}. Costprice is optional when using a synced price list.</p>
               <div className="sourceRow">
                 <input value={sourcePath} onChange={(event) => { setSourcePath(event.target.value); setValidation(null); setRunPreview(null); }} placeholder="Choose CSV/XLSX source" />
@@ -1007,7 +1038,7 @@ export default function App() {
               <p>{priceListId ? "Cost comes from the selected account's synced price list; costprice in the file is ignored. Missing or blank list values become zero when allowed." : "Cost comes from the import file. Blank quantity or cost becomes zero when allowed."}</p>
             </section>
             <section className="step stepValidate">
-              <div className="stepHeading"><span className="stepIndex">4</span><h2>Validate</h2></div>
+              <div className="stepHeading"><span className="stepIndex">3</span><h2>Validate</h2></div>
               <p>{hasReferences ? "References are available for local enrichment." : "Sync products, warehouses and locations before validation."}</p>
               <button onClick={validateSource} disabled={!!busy || !activeAccountName || !sourcePath || !hasReferences}>
                 {busy === "validateSource" ? <Loader2 className="spin" size={18} /> : <FileSearch size={18} />}
@@ -1015,11 +1046,11 @@ export default function App() {
               </button>
             </section>
             <section className="step stepPreview">
-              <div className="stepHeading"><span className="stepIndex">5</span><h2>Preview</h2></div>
+              <div className="stepHeading"><span className="stepIndex">4</span><h2>Preview</h2></div>
               <p>{validation ? `${validation.inserted} row(s) staged in validated_inventory.` : "Validation preview appears after source validation."}</p>
             </section>
             <section className="step stepRun">
-              <div className="stepHeading"><span className="stepIndex">6</span><h2>Run</h2></div>
+              <div className="stepHeading"><span className="stepIndex">5</span><h2>Run</h2></div>
               <button onClick={previewRun} disabled={!!busy || !validation?.inserted}>
                 {busy === "previewRun" ? <Loader2 className="spin" size={18} /> : <FileSearch size={18} />}
                 Dry run
@@ -1099,12 +1130,8 @@ export default function App() {
               </button>
             </div>
             <div className="taskFlow openSalesFlow">
-              <section className="step stepAccount">
-                <div className="stepHeading"><span className="stepIndex">1</span><h2>Account</h2></div>
-                <p>{activeAccountName ? `Using ${activeAccountName}.` : "Choose an account first."}</p>
-              </section>
               <section className="step stepRefs">
-                <div className="stepHeading"><span className="stepIndex">2</span><h2>References</h2></div>
+                <div className="stepHeading"><span className="stepIndex">1</span><h2>References</h2></div>
                 <div className="toolbar">
                   <button onClick={() => syncOpenSalesReferences("all")} disabled={!!busy || !activeAccountName}>
                     {busy === "syncOpenSales-all" ? <Loader2 className="spin" size={18} /> : <RefreshCw size={18} />}
@@ -1117,7 +1144,7 @@ export default function App() {
                 {showOpenSalesReferenceProgress && renderProgress(openSalesProgress, "records")}
               </section>
               <section className="step stepSource">
-                <div className="stepHeading"><span className="stepIndex">3</span><h2>Source</h2></div>
+                <div className="stepHeading"><span className="stepIndex">2</span><h2>Source</h2></div>
                 <div className="sourceRow">
                   <input value={openSalesPath} readOnly placeholder="Choose Open Sales CSV/XLSX" />
                   <button onClick={saveOpenSalesTemplate} disabled={!!busy}>
@@ -1131,7 +1158,7 @@ export default function App() {
                 </div>
               </section>
               <section className="step stepValidate">
-                <div className="stepHeading"><span className="stepIndex">4</span><h2>Validate</h2></div>
+                <div className="stepHeading"><span className="stepIndex">3</span><h2>Validate</h2></div>
                 <p>Checks customers, products, warehouses, channels, price lists, statuses, currencies, shipping and payments.</p>
                 <button onClick={validateOpenSalesSource} disabled={!!busy || !activeAccountName || !openSalesPath}>
                   {busy === "validateOpenSales" ? <Loader2 className="spin" size={18} /> : <FileSearch size={18} />}
@@ -1139,7 +1166,7 @@ export default function App() {
                 </button>
               </section>
               <section className="step stepRun">
-                <div className="stepHeading"><span className="stepIndex">5</span><h2>Sync to Brightpearl</h2></div>
+                <div className="stepHeading"><span className="stepIndex">4</span><h2>Sync to Brightpearl</h2></div>
                 <p>Creates one order at a time, saves the Brightpearl order id before payment, and stops for reconciliation if the outcome is uncertain.</p>
                 <input aria-label="Confirm account name for Open Sales sync" placeholder="Type account name" value={openSalesConfirm} disabled={!!busy} onChange={(event) => setOpenSalesConfirm(event.target.value)} />
                 <button onClick={runOpenSalesLive} disabled={!!busy || !openSalesPreview?.orders || openSalesConfirm !== activeAccountName}>
@@ -1227,12 +1254,8 @@ export default function App() {
               </button>
             </div>
             <div className="taskFlow openSalesFlow">
-              <section className="step stepAccount">
-                <div className="stepHeading"><span className="stepIndex">1</span><h2>Account</h2></div>
-                <p>{activeAccountName ? `Using ${activeAccountName}.` : "Choose an account first."}</p>
-              </section>
               <section className="step stepRefs">
-                <div className="stepHeading"><span className="stepIndex">2</span><h2>References</h2></div>
+                <div className="stepHeading"><span className="stepIndex">1</span><h2>References</h2></div>
                 <div className="toolbar">
                   <button onClick={() => syncOpenPurchasesReferences("all")} disabled={!!busy || !activeAccountName}>
                     {busy === "syncOpenPurchases-all" ? <Loader2 className="spin" size={18} /> : <RefreshCw size={18} />}
@@ -1245,7 +1268,7 @@ export default function App() {
                 {showOpenPurchasesReferenceProgress && renderProgress(openPurchasesProgress, "records")}
               </section>
               <section className="step stepSource">
-                <div className="stepHeading"><span className="stepIndex">3</span><h2>Source</h2></div>
+                <div className="stepHeading"><span className="stepIndex">2</span><h2>Source</h2></div>
                 <div className="sourceRow">
                   <input value={openPurchasesPath} readOnly placeholder="Choose Open Purchases CSV/XLSX" />
                   <button onClick={saveOpenPurchasesTemplate} disabled={!!busy}>
@@ -1259,7 +1282,7 @@ export default function App() {
                 </div>
               </section>
               <section className="step stepValidate">
-                <div className="stepHeading"><span className="stepIndex">4</span><h2>Validate</h2></div>
+                <div className="stepHeading"><span className="stepIndex">3</span><h2>Validate</h2></div>
                 <p>Checks suppliers, products, warehouses, channels, price lists, statuses, currencies, shipping and payments.</p>
                 <button onClick={validateOpenPurchasesSource} disabled={!!busy || !activeAccountName || !openPurchasesPath}>
                   {busy === "validateOpenPurchases" ? <Loader2 className="spin" size={18} /> : <FileSearch size={18} />}
@@ -1267,7 +1290,7 @@ export default function App() {
                 </button>
               </section>
               <section className="step stepRun">
-                <div className="stepHeading"><span className="stepIndex">5</span><h2>Sync to Brightpearl</h2></div>
+                <div className="stepHeading"><span className="stepIndex">4</span><h2>Sync to Brightpearl</h2></div>
                 <p>Creates one PO at a time, saves the Brightpearl order id before rows and payment, and stops for reconciliation if the outcome is uncertain.</p>
                 <input aria-label="Confirm account name for Open Purchases sync" placeholder="Type account name" value={openPurchasesConfirm} disabled={!!busy} onChange={(event) => setOpenPurchasesConfirm(event.target.value)} />
                 <button onClick={runOpenPurchasesLive} disabled={!!busy || !openPurchasesPreview?.orders || openPurchasesConfirm !== activeAccountName}>
