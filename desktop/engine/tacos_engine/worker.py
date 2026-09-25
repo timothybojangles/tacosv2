@@ -904,6 +904,7 @@ def validate_account(store: Store, params: dict[str, Any]) -> dict[str, Any]:
 def sync_inventory_references(store: Store, request_id: str, params: dict[str, Any]) -> dict[str, Any]:
     account_name = normalize_account_name(params.get("accountName"))
     ensure_no_open_inventory_run(store, account_name)
+    cancel_token = RequestCancelToken(request_id)
     mode = str(params.get("mode") or "all").strip()
     if mode not in {"all", "products", "warehouses", "locations", "priceLists"}:
         raise WorkerError("invalid_options", "Choose products, warehouses, locations, price lists or all.")
@@ -937,10 +938,12 @@ def sync_inventory_references(store: Store, request_id: str, params: dict[str, A
 
     with legacy_operation(store):
         if mode in {"all", "products"}:
+            check_cancel(request_id)
             results["products"] = update_product_catalogue(
-                account_name, str(db_path), log_callback=worker_log
+                account_name, str(db_path), log_callback=worker_log, cancel_token=cancel_token
             )
         if mode in {"all", "warehouses"}:
+            check_cancel(request_id)
             stage(0 if mode == "warehouses" else 45, "Syncing warehouses.")
             warehouse_result = fetch_and_store_reference_tables(
                 account_name,
@@ -949,22 +952,26 @@ def sync_inventory_references(store: Store, request_id: str, params: dict[str, A
                 str(db_path),
                 reference_keys=("warehouses",),
                 log_callback=worker_log,
+                cancel_token=cancel_token,
             )
             results["warehouses"] = warehouse_result.get("warehouses", 0)
             if mode == "warehouses":
                 stage(100, "Warehouse sync complete.")
         if mode in {"all", "locations"}:
+            check_cancel(request_id)
             stage(0 if mode == "locations" else 65, "Syncing locations.")
-            results["locations"] = update_location_catalogue(account_name, str(db_path), log_callback=worker_log)
+            results["locations"] = update_location_catalogue(account_name, str(db_path), log_callback=worker_log, cancel_token=cancel_token)
             if mode == "locations":
                 stage(100, "Location sync complete.")
         if mode in {"all", "priceLists"}:
+            check_cancel(request_id)
             stage(0 if mode == "priceLists" else 82, "Syncing price lists.")
-            pricelist_result = sync_inventory_pricelists(account_name, str(db_path), log_callback=worker_log)
+            pricelist_result = sync_inventory_pricelists(account_name, str(db_path), log_callback=worker_log, cancel_token=cancel_token)
             results["priceLists"] = pricelist_result.get("price_lists", 0)
             results["priceListValues"] = pricelist_result.get("price_list_values", 0)
             if mode == "priceLists":
                 stage(100, "Price list sync complete.")
+    check_cancel(request_id)
 
     update_job(store, request_id, kind="reference_sync", state="succeeded", message="Inventory references synced.")
     account = upsert_account_metadata(

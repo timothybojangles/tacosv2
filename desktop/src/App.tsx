@@ -182,6 +182,8 @@ export default function App() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [syncProgress, setSyncProgress] = useState<ProgressState | null>(null);
+  const [inventoryReferenceActiveRequestId, setInventoryReferenceActiveRequestId] = useState("");
+  const inventoryReferenceRequestId = useRef<string | null>(null);
   const [legacyOperations, setLegacyOperations] = useState<LegacyOperation[]>([]);
   const [legacyCategories, setLegacyCategories] = useState<string[]>([]);
   const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
@@ -298,6 +300,7 @@ export default function App() {
     setOpenSalesConfirm("");
     setOpenSalesLiveStatus(null);
     setOpenSalesProgress(null);
+    setInventoryReferenceActiveRequestId("");
     setOpenPurchasesValidation(null);
     setOpenPurchasesPreview(null);
     setOpenPurchasesConfirm("");
@@ -404,7 +407,16 @@ export default function App() {
     };
     setSyncProgress({ percent: 0, message: `Starting ${labels[mode]} sync...` });
     await run(`syncReferences-${mode}`, async () => {
-      const result = await engine("syncInventoryReferences", { accountName: activeAccountName, mode });
+      const activeId = requestId(`syncInventoryReferences-${mode}`);
+      inventoryReferenceRequestId.current = activeId;
+      setInventoryReferenceActiveRequestId(activeId);
+      let result: any;
+      try {
+        result = await engine("syncInventoryReferences", { accountName: activeAccountName, mode }, activeId);
+      } finally {
+        inventoryReferenceRequestId.current = null;
+        setInventoryReferenceActiveRequestId("");
+      }
       setValidation(null);
       setRunPreview(null);
       await refreshAccounts(result.account.accountName);
@@ -416,6 +428,12 @@ export default function App() {
       const completed = mode === "all" || mode === "products" ? result.results.products : undefined;
       setSyncProgress({ percent: 100, completed, total: completed, message: "Reference sync complete." });
     });
+  }
+
+  async function cancelInventoryReferences() {
+    const activeId = inventoryReferenceActiveRequestId || inventoryReferenceRequestId.current;
+    if (activeId) await engine("cancel", { id: activeId });
+    setSyncProgress((current) => current ? { ...current, message: "Cancellation requested. The current safe checkpoint will finish first." } : current);
   }
 
   async function chooseSource() {
@@ -1010,7 +1028,11 @@ export default function App() {
                 <button onClick={() => syncReferences("locations")} disabled={!!busy || !activeAccountName}>Sync Locations</button>
                 <button onClick={() => syncReferences("priceLists")} disabled={!!busy || !activeAccountName}>Sync Pricelists</button>
               </div>
-              {renderProgress(syncProgress, "products")}
+              {renderProgress(syncProgress, "products", {
+                canCancel: busy.startsWith("syncReferences") || !!inventoryReferenceActiveRequestId,
+                onCancel: cancelInventoryReferences,
+                cancelBusy: busy === "cancelInventoryReferences",
+              })}
             </section>
             <section className="step stepSource">
               <div className="stepHeading"><span className="stepIndex">2</span><h2>Source</h2></div>
@@ -1141,7 +1163,11 @@ export default function App() {
                   <button onClick={() => syncOpenSalesReferences("contacts")} disabled={!!busy || !activeAccountName}>Contact refs</button>
                   <button onClick={() => syncOpenSalesReferences("products")} disabled={!!busy || !activeAccountName}>Product refs</button>
                 </div>
-                {showOpenSalesReferenceProgress && renderProgress(openSalesProgress, "records")}
+                {showOpenSalesReferenceProgress && renderProgress(openSalesProgress, "records", {
+                  canCancel: busy.startsWith("syncOpenSales") || !!openSalesActiveRequestId,
+                  onCancel: cancelOpenSales,
+                  cancelBusy: busy === "cancelOpenSales",
+                })}
               </section>
               <section className="step stepSource">
                 <div className="stepHeading"><span className="stepIndex">2</span><h2>Source</h2></div>
@@ -1265,7 +1291,11 @@ export default function App() {
                   <button onClick={() => syncOpenPurchasesReferences("contacts")} disabled={!!busy || !activeAccountName}>Contact refs</button>
                   <button onClick={() => syncOpenPurchasesReferences("products")} disabled={!!busy || !activeAccountName}>Product refs</button>
                 </div>
-                {showOpenPurchasesReferenceProgress && renderProgress(openPurchasesProgress, "records")}
+                {showOpenPurchasesReferenceProgress && renderProgress(openPurchasesProgress, "records", {
+                  canCancel: busy.startsWith("syncOpenPurchases") || !!openPurchasesActiveRequestId,
+                  onCancel: cancelOpenPurchases,
+                  cancelBusy: busy === "cancelOpenPurchases",
+                })}
               </section>
               <section className="step stepSource">
                 <div className="stepHeading"><span className="stepIndex">2</span><h2>Source</h2></div>
