@@ -1,21 +1,23 @@
 use serde_json::{json, Value};
-use tauri::Emitter;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
+use tauri::Emitter;
 
 const PROTOCOL_VERSION: i64 = 1;
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 
+#[derive(Clone)]
 struct WorkerProcess {
-    child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    child: Arc<Mutex<Child>>,
+    stdin: Arc<Mutex<ChildStdin>>,
+    stdout: Arc<Mutex<BufReader<ChildStdout>>>,
 }
 
 struct EngineState {
     worker: Arc<Mutex<Option<WorkerProcess>>>,
+    request_lock: Arc<Mutex<()>>,
 }
 
 fn worker_script() -> Result<PathBuf, String> {
@@ -37,7 +39,12 @@ fn worker_script() -> Result<PathBuf, String> {
 fn python_exe() -> String {
     std::env::var("TACOS_ENGINE_PYTHON").unwrap_or_else(|_| {
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let candidate = manifest.join("..").join("..").join(".venv").join("Scripts").join("python.exe");
+        let candidate = manifest
+            .join("..")
+            .join("..")
+            .join(".venv")
+            .join("Scripts")
+            .join("python.exe");
         if candidate.exists() {
             candidate.to_string_lossy().to_string()
         } else {
@@ -64,14 +71,9 @@ fn start_worker() -> Result<WorkerProcess, String> {
     let stdin = child.stdin.take().ok_or("Worker stdin unavailable")?;
     let stdout = child.stdout.take().ok_or("Worker stdout unavailable")?;
     let mut stderr = child.stderr.take().ok_or("Worker stderr unavailable")?;
-    let mut process = WorkerProcess {
-        child,
-        stdin,
-        stdout: BufReader::new(stdout),
-    };
+    let mut stdout_reader = BufReader::new(stdout);
     let mut ready = String::new();
-    process
-        .stdout
+    stdout_reader
         .read_line(&mut ready)
         .map_err(|err| format!("Worker did not become ready: {err}"))?;
     if ready.is_empty() {
@@ -92,18 +94,28 @@ fn start_worker() -> Result<WorkerProcess, String> {
     std::thread::spawn(move || {
         let _ = std::io::copy(&mut stderr, &mut std::io::sink());
     });
-    Ok(process)
+    Ok(WorkerProcess {
+        child: Arc::new(Mutex::new(child)),
+        stdin: Arc::new(Mutex::new(stdin)),
+        stdout: Arc::new(Mutex::new(stdout_reader)),
+    })
 }
 
 fn validate_request(request: &Value) -> Result<(), String> {
     if request.get("protocolVersion").and_then(Value::as_i64) != Some(PROTOCOL_VERSION) {
         return Err("Unsupported engine protocol version.".to_string());
     }
-    let id = request.get("id").and_then(Value::as_str).unwrap_or_default();
+    let id = request
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     if id.is_empty() || id.len() > 120 {
         return Err("Engine request id is missing or too long.".to_string());
     }
-    let method = request.get("method").and_then(Value::as_str).unwrap_or_default();
+    let method = request
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     match method {
         "importSyntheticCsv"
         | "previewDataset"
@@ -157,7 +169,14 @@ fn event_to_emit(value: &Value) -> Option<(&'static str, Value)> {
     } else {
         "engine-event"
     };
-    Some((channel, if channel == "engine-event" { value.clone() } else { data }))
+    Some((
+        channel,
+        if channel == "engine-event" {
+            value.clone()
+        } else {
+            data
+        },
+    ))
 }
 
 #[tauri::command]
@@ -168,14 +187,41 @@ async fn engine_request(
 ) -> Result<Value, String> {
     validate_request(&request)?;
     let worker_state = Arc::clone(&state.worker);
-    tauri::async_runtime::spawn_blocking(move || engine_request_blocking(app, worker_state, request))
-        .await
-        .map_err(|err| format!("Engine task failed: {err}"))?
+    let request_lock = Arc::clone(&state.request_lock);
+    tauri::async_runtime::spawn_blocking(move || {
+        engine_request_blocking(app, worker_state, request_lock, request)
+    })
+    .await
+    .map_err(|err| format!("Engine task failed: {err}"))?
+}
+
+fn worker_handles(
+    worker_state: &Arc<Mutex<Option<WorkerProcess>>>,
+) -> Result<WorkerProcess, String> {
+    let mut guard = worker_state
+        .lock()
+        .map_err(|_| "Engine state is poisoned")?;
+    if guard.is_none() {
+        *guard = Some(start_worker()?);
+    }
+    guard
+        .clone()
+        .ok_or("Worker could not be started".to_string())
+}
+
+fn write_worker_request(worker: &WorkerProcess, encoded: &str) -> Result<(), String> {
+    let mut stdin = worker
+        .stdin
+        .lock()
+        .map_err(|_| "Worker stdin is poisoned")?;
+    writeln!(stdin, "{encoded}").map_err(|err| format!("Could not write to worker: {err}"))?;
+    stdin.flush().map_err(|err| err.to_string())
 }
 
 fn engine_request_blocking(
     app: tauri::AppHandle,
     worker_state: Arc<Mutex<Option<WorkerProcess>>>,
+    request_lock: Arc<Mutex<()>>,
     request: Value,
 ) -> Result<Value, String> {
     let encoded = serde_json::to_string(&request).map_err(|err| err.to_string())?;
@@ -187,23 +233,38 @@ fn engine_request_blocking(
         .and_then(Value::as_str)
         .ok_or("Engine request id is required")?
         .to_string();
+    let method = request
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
 
-    let mut guard = worker_state.lock().map_err(|_| "Engine state is poisoned")?;
-    if guard.is_none() {
-        *guard = Some(start_worker()?);
+    let worker = worker_handles(&worker_state)?;
+    if method == "cancel" {
+        write_worker_request(&worker, &encoded)?;
+        return Ok(json!({
+            "ok": true,
+            "result": {"cancelQueued": true},
+            "error": Value::Null
+        }));
     }
-    let worker = guard.as_mut().ok_or("Worker could not be started")?;
-    writeln!(worker.stdin, "{encoded}").map_err(|err| format!("Could not write to worker: {err}"))?;
-    worker.stdin.flush().map_err(|err| err.to_string())?;
+
+    let _request_guard = request_lock
+        .lock()
+        .map_err(|_| "Engine request lock is poisoned")?;
+    write_worker_request(&worker, &encoded)?;
 
     loop {
         let mut line = String::new();
         let read = worker
             .stdout
+            .lock()
+            .map_err(|_| "Worker stdout is poisoned")?
             .read_line(&mut line)
             .map_err(|err| format!("Could not read worker response: {err}"))?;
         if read == 0 {
-            *guard = None;
+            if let Ok(mut guard) = worker_state.lock() {
+                *guard = None;
+            }
             return Err("The Python worker exited unexpectedly.".to_string());
         }
         if line.as_bytes().len() > MAX_MESSAGE_BYTES {
@@ -228,6 +289,7 @@ fn main() {
     tauri::Builder::default()
         .manage(EngineState {
             worker: Arc::new(Mutex::new(None)),
+            request_lock: Arc::new(Mutex::new(())),
         })
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![engine_request])
@@ -237,7 +299,11 @@ fn main() {
 
 impl Drop for WorkerProcess {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        if Arc::strong_count(&self.child) == 1 {
+            if let Ok(mut child) = self.child.lock() {
+                let _ = child.kill();
+            }
+        }
     }
 }
 
