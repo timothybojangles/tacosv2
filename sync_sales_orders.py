@@ -349,9 +349,13 @@ def post_payment(url, headers, payload, *, cancel_token=None):
                     )
                 return True, (resp.json() if "application/json" in resp.headers.get("Content-Type","") else resp.text)
             else:
-                _log(f"Payment failed {resp.status_code}: {resp.text[:500]}")
+                detail = f"HTTP {resp.status_code}: {resp.text[:500]}"
+                _log(f"Payment failed {detail}")
+                return False, detail
         except requests.RequestException as e:
+            detail = f"Request error: {e}"
             _log(f"Payment request error: {e}")
+            return False, detail
         sleep_with_cancel_ms(
             int(attempt * 1000),
             cancel_token=cancel_token,

@@ -513,6 +513,12 @@ def validate_sales_orders(csv_path, db_path, account_name, *, log_callback: LogC
                 if payment_amount_error:
                     _reject(f"Invalid payment amount: {payment_amount_raw}", invalid_payment_amounts)
                     continue
+                if payment_amount and payment_amount > 0 and not payment_date_raw:
+                    _reject("Payment date is required when payment_amount is greater than zero", invalid_payment_dates)
+                    continue
+                if payment_amount and payment_amount > 0 and not payment_method_code:
+                    _reject("Payment method code is required when payment_amount is greater than zero", invalid_payment_methods)
+                    continue
 
                 # date is optional; if present, must be valid
                 if payment_date_raw:

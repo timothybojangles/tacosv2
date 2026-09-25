@@ -1351,12 +1351,21 @@ def run_open_sales_order(store: Store, request_id: str, params: dict[str, Any]) 
         ).fetchone()
         if uncertain:
             raise WorkerError("reconciliation_required", f"Order {uncertain['order_ref']} has an uncertain outcome. Reconcile it in Brightpearl before continuing.")
+        try:
+            total_staged = int(conn.execute(f"SELECT COUNT(*) FROM {SALES_ORDERS_TABLE}").fetchone()[0])
+            completed_before = int(conn.execute(
+                f"SELECT COUNT(*) FROM {SALES_ORDERS_TABLE} WHERE processed = 1"
+            ).fetchone()[0])
+        except sqlite3.OperationalError:
+            total_staged = 0
+            completed_before = 0
 
     with legacy_operation(store):
         orders = load_validated_sales_orders(str(db_path))
     check_cancel(request_id)
-    total = len(orders)
-    if total == 0:
+    remaining_before = len(orders)
+    total = max(total_staged, remaining_before)
+    if remaining_before == 0:
         return {"done": True, "completed": 0, "remaining": 0, "total": 0, "waitMs": 0}
     order = orders[0]
     order_ref = str(order["order_ref"])
@@ -1365,8 +1374,8 @@ def run_open_sales_order(store: Store, request_id: str, params: dict[str, Any]) 
                message=f"Sending Open Sales order {order_ref}.")
     emit_event(request_id, "progress", {
         "operation": "open_sales_live_order",
-        "percent": int(((total - len(orders)) / max(total, 1)) * 100),
-        "completed": max(0, total - len(orders)),
+        "percent": int((completed_before / max(total, 1)) * 100),
+        "completed": completed_before,
         "total": total,
         "message": f"Sending Open Sales order {order_ref}.",
     })
@@ -1420,15 +1429,16 @@ def run_open_sales_order(store: Store, request_id: str, params: dict[str, Any]) 
     if payment_required and order.get("payment_method_code") and order.get("payment_date"):
         payment_payload = build_sales_payment_payload(order_id, order)
         with legacy_operation(store):
-            ok, _ = post_sales_payment(payment_url, headers, payment_payload, cancel_token=cancel_token)
+            ok, payment_response = post_sales_payment(payment_url, headers, payment_payload, cancel_token=cancel_token)
         if not ok:
             report_path = write_open_sales_failed_csv(store, account_name, order, "failed_sales_order_payments")
+            reason = str(payment_response or "Brightpearl did not return a payment error body.")
             with sqlite3.connect(db_path) as conn:
                 conn.execute(
                     "UPDATE open_sales_live_orders SET state = 'payment_failed', payment_state = 'failed', error = ?, updated_at = ? WHERE order_ref = ?",
-                    (f"Payment failed. The order id is saved; retry will reuse it. Failed CSV: {report_path}", time.time(), order_ref),
+                    (f"Payment failed: {reason}. The order id is saved; retry will reuse it. Failed CSV: {report_path}", time.time(), order_ref),
                 )
-            raise WorkerError("write_uncertain", f"Order {order_ref}: payment failed. The order id {order_id} is saved; retry will not recreate the order. Failed CSV: {report_path}.")
+            raise WorkerError("write_uncertain", f"Order {order_ref}: payment failed: {reason}. The order id {order_id} is saved; retry will not recreate the order. Failed CSV: {report_path}.")
         payment_state = "succeeded"
     elif payment_required:
         report_path = write_open_sales_failed_csv(store, account_name, order, "failed_sales_order_payments")
@@ -1453,13 +1463,20 @@ def run_open_sales_order(store: Store, request_id: str, params: dict[str, Any]) 
             "UPDATE open_sales_live_orders SET state = 'succeeded', payment_state = ?, error = NULL, updated_at = ? WHERE order_ref = ?",
             (payment_state, time.time(), order_ref),
         )
-    remaining = max(0, total - 1)
+    with sqlite3.connect(db_path) as conn:
+        try:
+            remaining = int(conn.execute(
+                f"SELECT COUNT(*) FROM {SALES_ORDERS_TABLE} WHERE {unprocessed_where_clause()}"
+            ).fetchone()[0])
+        except sqlite3.OperationalError:
+            remaining = max(0, remaining_before - 1)
+    completed_after = max(0, total - remaining)
     update_job(store, request_id, kind="open_sales_live_order", state="succeeded", dataset_id=account_name,
                message=f"Open Sales order {order_ref} confirmed as Brightpearl order {order_id}.")
     emit_event(request_id, "progress", {
         "operation": "open_sales_live_order",
-        "percent": int(((total - remaining) / max(total, 1)) * 100),
-        "completed": total - remaining,
+        "percent": int((completed_after / max(total, 1)) * 100),
+        "completed": completed_after,
         "total": total,
         "message": f"Open Sales order {order_ref} confirmed.",
     })

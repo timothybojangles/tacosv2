@@ -508,6 +508,7 @@ def test_open_sales_single_validated_row_posts_payment(tmp_path, monkeypatch, ca
         "\n".join([
             "order_ref,placed_on,tax_date,delivery_date,customer_email,warehouse,channel,order_status,currency,price_list,exchange_rate,shipping_method,payment_amount,payment_date,payment_ref,payment_method_code,delivery_address_name,delivery_address_line1,delivery_address_line2,delivery_address_line3,delivery_address_line4,delivery_postcode,delivery_country,delivery_telephone,delivery_email,item_name,item_sku,item qty,item_tax_code,row_net,row_tax_amount",
             "SO-PAID,01/09/2026,01/09/2026,02/09/2026,buyer@example.com,Main,WEB,NEW,GBP,GBP,1,STD,12.00,01/09/2026,PAY-1,CARD,Buyer,Line 1,,,,AB1 2CD,GB,,buyer@example.com,Widget,SKU-1,2,T20,10.00,2.00",
+            "SO-NEXT,01/09/2026,01/09/2026,02/09/2026,buyer@example.com,Main,WEB,NEW,GBP,GBP,1,STD,,,,,Buyer,Line 1,,,,AB1 2CD,GB,,buyer@example.com,Widget,SKU-1,1,T20,5.00,1.00",
         ]),
         encoding="utf-8",
     )
@@ -523,6 +524,8 @@ def test_open_sales_single_validated_row_posts_payment(tmp_path, monkeypatch, ca
         }, "sales-live-paid"))
     result = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
     assert result["paymentState"] == "succeeded"
+    assert result["total"] == 2
+    assert result["remaining"] == 1
     post_payment.assert_called_once()
     payload = post_payment.call_args.args[2]
     assert payload["orderId"] == 1001
@@ -571,13 +574,14 @@ def test_open_sales_live_retry_reuses_saved_order_id(tmp_path, monkeypatch, caps
 
     with (
         patch.object(worker, "post_sales_order", return_value=(True, 999)) as create_order,
-        patch.object(worker, "post_sales_payment", return_value=(False, None)),
+        patch.object(worker, "post_sales_payment", return_value=(False, "HTTP 400: payment method not valid for this order")),
     ):
         handle(store, _request("runOpenSalesOrder", {
             "accountName": "demo", "confirmAccountName": "demo"
         }, "sales-live-1"))
     failed = json.loads(capsys.readouterr().out.splitlines()[-1])
     assert failed["error"]["code"] == "write_uncertain"
+    assert "payment method not valid" in failed["error"]["message"]
     create_order.assert_called_once()
 
     with sqlite3.connect(db_path) as conn:
@@ -594,6 +598,8 @@ def test_open_sales_live_retry_reuses_saved_order_id(tmp_path, monkeypatch, caps
     create_order_again.assert_not_called()
     assert result["orderId"] == 999
     assert result["paymentState"] == "succeeded"
+    assert result["total"] == 1
+    assert result["remaining"] == 0
 
 
 def test_open_sales_live_suppresses_legacy_stdout(tmp_path, monkeypatch, capsys):
@@ -704,6 +710,54 @@ def test_open_sales_payment_amount_without_details_errors(tmp_path, monkeypatch,
     failed = json.loads(capsys.readouterr().out.splitlines()[-1])
     assert failed["error"]["code"] == "missing_payment_details"
     post_payment.assert_not_called()
+
+
+def test_open_sales_validation_rejects_payment_amount_without_details(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("TACOS_CREDENTIAL_BACKEND", "sqlite_plaintext")
+    monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))
+    store = app_store()
+    handle(store, _request(
+        "saveAccount",
+        {"accountName": "demo", "appRef": "app", "token": "secret", "region": "euw1"},
+        "save-1",
+    ))
+    capsys.readouterr()
+    db_path = worker.account_data_db(store, "demo")
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript("""
+            CREATE TABLE contact_catalogue (contactId INTEGER, primaryEmail TEXT, isCustomer INTEGER, isSupplier INTEGER);
+            INSERT INTO contact_catalogue VALUES (42, 'buyer@example.com', 1, 0);
+            CREATE TABLE product_catalogue (productId INTEGER, SKU TEXT);
+            INSERT INTO product_catalogue VALUES (101, 'SKU-1');
+            CREATE TABLE ref_warehouses (warehouseId INTEGER, name TEXT);
+            INSERT INTO ref_warehouses VALUES (1, 'Main');
+            CREATE TABLE ref_channels (channelId INTEGER, code TEXT, name TEXT);
+            INSERT INTO ref_channels VALUES (2, 'WEB', 'Web');
+            CREATE TABLE ref_price_lists (priceListId INTEGER, code TEXT, name TEXT);
+            INSERT INTO ref_price_lists VALUES (3, 'GBP', 'GBP Retail');
+            CREATE TABLE ref_currencies (isoCode TEXT);
+            INSERT INTO ref_currencies VALUES ('GBP');
+            CREATE TABLE ref_shipping_methods (shippingMethodId INTEGER, code TEXT, name TEXT);
+            INSERT INTO ref_shipping_methods VALUES (4, 'STD', 'Standard');
+            CREATE TABLE ref_payment_methods (code TEXT);
+            INSERT INTO ref_payment_methods VALUES ('CARD');
+            CREATE TABLE ref_order_statuses (statusId INTEGER, code TEXT, name TEXT, rawJson TEXT);
+            INSERT INTO ref_order_statuses VALUES (5, 'NEW', 'New', '{"orderTypeCode":"SO"}');
+        """)
+    source = tmp_path / "bad-payment-open-sales.csv"
+    source.write_text(
+        "\n".join([
+            "order_ref,placed_on,tax_date,delivery_date,customer_email,warehouse,channel,order_status,currency,price_list,exchange_rate,shipping_method,payment_amount,payment_date,payment_ref,payment_method_code,delivery_address_name,delivery_address_line1,delivery_address_line2,delivery_address_line3,delivery_address_line4,delivery_postcode,delivery_country,delivery_telephone,delivery_email,item_name,item_sku,item qty,item_tax_code,row_net,row_tax_amount",
+            "SO-BAD-PAY,01/09/2026,01/09/2026,02/09/2026,buyer@example.com,Main,WEB,NEW,GBP,GBP,1,STD,12.00,,PAY-1,,Buyer,Line 1,,,,AB1 2CD,GB,,buyer@example.com,Widget,SKU-1,2,T20,10.00,2.00",
+        ]),
+        encoding="utf-8",
+    )
+
+    handle(store, _request("validateOpenSalesFile", {"accountName": "demo", "path": str(source)}, "sales-validate-bad-payment"))
+    result = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
+    assert result["orders"] == 0
+    assert result["rows"] == 0
+    assert any("Payment date is required" in message for message in result["logs"])
 
 
 def test_open_sales_template_and_reference_sync_parity(tmp_path, monkeypatch, capsys):

@@ -471,6 +471,10 @@ export default function App() {
           setOpenSalesActiveRequestId("");
           const status = await engine("openSalesLiveStatus", { accountName });
           setOpenSalesLiveStatus(status);
+          setOpenSalesProgress((current) => current ? {
+            ...current,
+            message: `Stopped at first write error. ${status.remaining ?? 0} order(s) remain unprocessed; fix or reconcile the failed order before retrying.`,
+          } : current);
           throw err;
         }
         const status = await engine("openSalesLiveStatus", { accountName });
