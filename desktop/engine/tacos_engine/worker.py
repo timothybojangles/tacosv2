@@ -1382,6 +1382,27 @@ def open_sales_live_status(store: Store, params: dict[str, Any]) -> dict[str, An
     return {"orders": [dict(row) for row in rows], "remaining": remaining}
 
 
+def live_order_progress_counts(db_path: Path, table: str, remaining_before: int) -> tuple[int, int]:
+    try:
+        with sqlite3.connect(db_path) as conn:
+            total = int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+            completed = int(conn.execute(f"SELECT COUNT(*) FROM {table} WHERE processed = 1").fetchone()[0])
+    except sqlite3.OperationalError:
+        total = remaining_before
+        completed = 0
+    return max(total, remaining_before), completed
+
+
+def live_order_remaining_count(db_path: Path, table: str, fallback: int) -> int:
+    try:
+        with sqlite3.connect(db_path) as conn:
+            return int(conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE {unprocessed_where_clause()}"
+            ).fetchone()[0])
+    except sqlite3.OperationalError:
+        return fallback
+
+
 def run_open_sales_order(store: Store, request_id: str, params: dict[str, Any]) -> dict[str, Any]:
     account_name = normalize_account_name(params.get("accountName"))
     cancel_token = RequestCancelToken(request_id)
@@ -1400,20 +1421,12 @@ def run_open_sales_order(store: Store, request_id: str, params: dict[str, Any]) 
         ).fetchone()
         if uncertain:
             raise WorkerError("reconciliation_required", f"Order {uncertain['order_ref']} has an uncertain outcome. Reconcile it in Brightpearl before continuing.")
-        try:
-            total_staged = int(conn.execute(f"SELECT COUNT(*) FROM {SALES_ORDERS_TABLE}").fetchone()[0])
-            completed_before = int(conn.execute(
-                f"SELECT COUNT(*) FROM {SALES_ORDERS_TABLE} WHERE processed = 1"
-            ).fetchone()[0])
-        except sqlite3.OperationalError:
-            total_staged = 0
-            completed_before = 0
 
     with legacy_operation(store):
         orders = load_validated_sales_orders(str(db_path))
     check_cancel(request_id)
     remaining_before = len(orders)
-    total = max(total_staged, remaining_before)
+    total, completed_before = live_order_progress_counts(db_path, SALES_ORDERS_TABLE, remaining_before)
     if remaining_before == 0:
         return {"done": True, "completed": 0, "remaining": 0, "total": 0, "waitMs": 0}
     order = orders[0]
@@ -1512,13 +1525,7 @@ def run_open_sales_order(store: Store, request_id: str, params: dict[str, Any]) 
             "UPDATE open_sales_live_orders SET state = 'succeeded', payment_state = ?, error = NULL, updated_at = ? WHERE order_ref = ?",
             (payment_state, time.time(), order_ref),
         )
-    with sqlite3.connect(db_path) as conn:
-        try:
-            remaining = int(conn.execute(
-                f"SELECT COUNT(*) FROM {SALES_ORDERS_TABLE} WHERE {unprocessed_where_clause()}"
-            ).fetchone()[0])
-        except sqlite3.OperationalError:
-            remaining = max(0, remaining_before - 1)
+    remaining = live_order_remaining_count(db_path, SALES_ORDERS_TABLE, max(0, remaining_before - 1))
     completed_after = max(0, total - remaining)
     update_job(store, request_id, kind="open_sales_live_order", state="succeeded", dataset_id=account_name,
                message=f"Open Sales order {order_ref} confirmed as Brightpearl order {order_id}.")
@@ -1835,8 +1842,9 @@ def run_open_purchases_order(store: Store, request_id: str, params: dict[str, An
     with legacy_operation(store):
         orders = load_validated_purchase_orders(str(db_path))
     check_cancel(request_id)
-    total = len(orders)
-    if total == 0:
+    remaining_before = len(orders)
+    total, completed_before = live_order_progress_counts(db_path, PURCHASE_ORDERS_TABLE, remaining_before)
+    if remaining_before == 0:
         return {"done": True, "completed": 0, "remaining": 0, "total": 0, "waitMs": 0}
     order = orders[0]
     order_ref = str(order["order_ref"])
@@ -1845,8 +1853,8 @@ def run_open_purchases_order(store: Store, request_id: str, params: dict[str, An
                message=f"Sending Open Purchases order {order_ref}.")
     emit_event(request_id, "progress", {
         "operation": "open_purchases_live_order",
-        "percent": int(((total - len(orders)) / max(total, 1)) * 100),
-        "completed": max(0, total - len(orders)),
+        "percent": int((completed_before / max(total, 1)) * 100),
+        "completed": completed_before,
         "total": total,
         "message": f"Sending Open Purchases order {order_ref}.",
     })
@@ -1960,13 +1968,14 @@ def run_open_purchases_order(store: Store, request_id: str, params: dict[str, An
             "UPDATE open_purchases_live_orders SET state = 'succeeded', rows_state = 'succeeded', payment_state = ?, error = NULL, updated_at = ? WHERE order_ref = ?",
             (payment_state, time.time(), order_ref),
         )
-    remaining = max(0, total - 1)
+    remaining = live_order_remaining_count(db_path, PURCHASE_ORDERS_TABLE, max(0, remaining_before - 1))
+    completed_after = max(0, total - remaining)
     update_job(store, request_id, kind="open_purchases_live_order", state="succeeded", dataset_id=account_name,
                message=f"Open Purchases order {order_ref} confirmed as Brightpearl order {order_id}.")
     emit_event(request_id, "progress", {
         "operation": "open_purchases_live_order",
-        "percent": int(((total - remaining) / max(total, 1)) * 100),
-        "completed": total - remaining,
+        "percent": int((completed_after / max(total, 1)) * 100),
+        "completed": completed_after,
         "total": total,
         "message": f"Open Purchases order {order_ref} confirmed.",
     })

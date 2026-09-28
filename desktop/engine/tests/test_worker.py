@@ -960,6 +960,17 @@ def _open_purchases_csv(path):
     )
 
 
+def _open_purchases_two_order_csv(path):
+    path.write_text(
+        "\n".join([
+            "order_ref,price_list,placed_on,order_status,delivery_date,shipping_method,currency,exchangeRate,payment_amount,payment_date,payment_ref,payment_method_code,supplier_email,warehouseId,channel,sku,quantity,row_net,row_tax,tax_code,nominal_code,item_name",
+            "PO-1,GBP,01/09/2026,NEW,02/09/2026,STD,GBP,1,12.00,01/09/2026,PAY-1,BACS,supplier@example.com,1,WEB,SKU-PO,2,10.00,2.00,T20,,Widget",
+            "PO-2,GBP,01/09/2026,NEW,02/09/2026,STD,GBP,1,,,,,supplier@example.com,1,WEB,SKU-PO,1,5.00,1.00,T20,,Widget",
+        ]),
+        encoding="utf-8",
+    )
+
+
 def test_open_purchases_validation_stages_orders_and_preview(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("TACOS_CREDENTIAL_BACKEND", "sqlite_plaintext")
     monkeypatch.setenv("TACOS_DESKTOP_DATA_DIR", str(tmp_path / "appdata"))
@@ -1044,7 +1055,7 @@ def test_open_purchases_live_posts_rows_and_payment(tmp_path, monkeypatch, capsy
     db_path = worker.account_data_db(store, "demo")
     _seed_open_purchases_refs(db_path)
     source = tmp_path / "paid-open-purchases.csv"
-    _open_purchases_csv(source)
+    _open_purchases_two_order_csv(source)
     handle(store, _request("validateOpenPurchasesFile", {"accountName": "demo", "path": str(source)}, "purchases-validate-paid"))
     assert json.loads(capsys.readouterr().out.splitlines()[-1])["result"]["preview"]["payments"] == 1
 
@@ -1056,6 +1067,8 @@ def test_open_purchases_live_posts_rows_and_payment(tmp_path, monkeypatch, capsy
         handle(store, _request("runOpenPurchasesOrder", {"accountName": "demo", "confirmAccountName": "demo"}, "purchases-live-paid"))
     result = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
     assert result["paymentState"] == "succeeded"
+    assert result["total"] == 2
+    assert result["remaining"] == 1
     post_row.assert_called_once()
     post_payment.assert_called_once()
     assert post_payment.call_args.args[2]["orderId"] == 3001
