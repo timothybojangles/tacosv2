@@ -350,9 +350,13 @@ def post_payment(url, headers, payload, *, cancel_token=None):
                     sleep_with_cancel_ms(default_sleep_ms, cancel_token=cancel_token)
                 return True, (resp.json() if "application/json" in resp.headers.get("Content-Type", "") else resp.text)
             else:
-                _log(f"Payment {resp.status_code}: {resp.text[:500]}")
+                detail = f"HTTP {resp.status_code}: {resp.text[:500]}"
+                _log(f"Payment {detail}")
+                return False, detail
         except requests.RequestException as e:
+            detail = f"Request error: {e}"
             _log(f"Payment request error: {e}")
+            return False, detail
         sleep_with_cancel_ms(default_sleep_ms * attempt, cancel_token=cancel_token)
     return False, None
 

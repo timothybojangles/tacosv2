@@ -1255,29 +1255,46 @@ def save_open_sales_template(store: Store, params: dict[str, Any]) -> dict[str, 
     return {"path": str(destination), "headers": SALES_TEMPLATE_HEADERS}
 
 
-def write_open_sales_failed_csv(store: Store, account_name: str, order: dict[str, Any], filename_tag: str) -> Path:
+def write_order_failed_csv(
+    store: Store,
+    account_name: str,
+    order: dict[str, Any],
+    filename_tag: str,
+    *,
+    rows: list[dict[str, Any]] | None = None,
+    error: str | None = None,
+) -> Path:
     reports_dir = store.accounts / account_name / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
     path = reports_dir / f"{account_name}_{filename_tag}_{int(time.time())}.csv"
-    rows = []
+    output_rows = []
     headers: list[str] = []
-    for row in order.get("rows", []):
+    source_rows = rows if rows is not None else order.get("rows", [])
+    for row in source_rows:
         try:
             original = json.loads(row.get("original_row_json") or "{}")
         except (TypeError, ValueError):
             original = {"order_ref": order.get("order_ref")}
+        if error:
+            original["error"] = error
         for key in original:
             if key not in headers:
                 headers.append(key)
-        rows.append(original)
+        output_rows.append(original)
     if not headers:
         headers = list(order.get("source_headers") or ["order_ref"])
-        rows = [{"order_ref": order.get("order_ref")}]
+        if error and "error" not in headers:
+            headers.append("error")
+        output_rows = [{"order_ref": order.get("order_ref"), **({"error": error} if error else {})}]
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=headers, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(output_rows)
     return path
+
+
+def write_open_sales_failed_csv(store: Store, account_name: str, order: dict[str, Any], filename_tag: str, error: str | None = None) -> Path:
+    return write_order_failed_csv(store, account_name, order, filename_tag, error=error)
 
 
 def sync_open_sales_references(store: Store, request_id: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -1466,7 +1483,8 @@ def run_open_sales_order(store: Store, request_id: str, params: dict[str, Any]) 
         with legacy_operation(store):
             ok, created_id = post_sales_order(order_url, headers, payload, cancel_token=cancel_token)
         if not ok or not created_id:
-            report_path = write_open_sales_failed_csv(store, account_name, order, "failed_sales_orders")
+            failure = "Order creation was not confirmed by Brightpearl."
+            report_path = write_open_sales_failed_csv(store, account_name, order, "failed_sales_orders", failure)
             with sqlite3.connect(db_path) as conn:
                 conn.execute(
                     "UPDATE open_sales_live_orders SET state = 'unknown', error = ?, updated_at = ? WHERE order_ref = ?",
@@ -1493,8 +1511,9 @@ def run_open_sales_order(store: Store, request_id: str, params: dict[str, Any]) 
         with legacy_operation(store):
             ok, payment_response = post_sales_payment(payment_url, headers, payment_payload, cancel_token=cancel_token)
         if not ok:
-            report_path = write_open_sales_failed_csv(store, account_name, order, "failed_sales_order_payments")
             reason = str(payment_response or "Brightpearl did not return a payment error body.")
+            failure = f"Payment failed: {reason}"
+            report_path = write_open_sales_failed_csv(store, account_name, order, "failed_sales_order_payments", failure)
             with sqlite3.connect(db_path) as conn:
                 conn.execute(
                     "UPDATE open_sales_live_orders SET state = 'payment_failed', payment_state = 'failed', error = ?, updated_at = ? WHERE order_ref = ?",
@@ -1503,7 +1522,8 @@ def run_open_sales_order(store: Store, request_id: str, params: dict[str, Any]) 
             raise WorkerError("write_uncertain", f"Order {order_ref}: payment failed: {reason}. The order id {order_id} is saved; retry will not recreate the order. Failed CSV: {report_path}.")
         payment_state = "succeeded"
     elif payment_required:
-        report_path = write_open_sales_failed_csv(store, account_name, order, "failed_sales_order_payments")
+        failure = "Payment amount is present but payment_date or payment_method_code is missing."
+        report_path = write_open_sales_failed_csv(store, account_name, order, "failed_sales_order_payments", failure)
         with sqlite3.connect(db_path) as conn:
             conn.execute(
                 "UPDATE open_sales_live_orders SET state = 'payment_failed', payment_state = 'missing_details', error = ?, updated_at = ? WHERE order_ref = ?",
@@ -1697,30 +1717,15 @@ def save_open_purchases_template(store: Store, params: dict[str, Any]) -> dict[s
     return {"path": str(destination), "headers": PURCHASE_TEMPLATE_HEADERS}
 
 
-def write_open_purchases_failed_csv(store: Store, account_name: str, order: dict[str, Any], filename_tag: str, rows: list[dict[str, Any]] | None = None) -> Path:
-    reports_dir = store.accounts / account_name / "reports"
-    reports_dir.mkdir(parents=True, exist_ok=True)
-    path = reports_dir / f"{account_name}_{filename_tag}_{int(time.time())}.csv"
-    source_rows = rows if rows is not None else order.get("rows", [])
-    output_rows = []
-    headers: list[str] = []
-    for row in source_rows:
-        try:
-            original = json.loads(row.get("original_row_json") or "{}")
-        except (TypeError, ValueError):
-            original = {"order_ref": order.get("order_ref")}
-        for key in original:
-            if key not in headers:
-                headers.append(key)
-        output_rows.append(original)
-    if not headers:
-        headers = list(order.get("source_headers") or ["order_ref"])
-        output_rows = [{"order_ref": order.get("order_ref")}]
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=headers, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(output_rows)
-    return path
+def write_open_purchases_failed_csv(
+    store: Store,
+    account_name: str,
+    order: dict[str, Any],
+    filename_tag: str,
+    rows: list[dict[str, Any]] | None = None,
+    error: str | None = None,
+) -> Path:
+    return write_order_failed_csv(store, account_name, order, filename_tag, rows=rows, error=error)
 
 
 def sync_open_purchases_references(store: Store, request_id: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -1886,7 +1891,8 @@ def run_open_purchases_order(store: Store, request_id: str, params: dict[str, An
         with legacy_operation(store):
             ok, created_id = post_purchase_order(order_url, headers, payload, cancel_token=cancel_token)
         if not ok or not created_id:
-            report_path = write_open_purchases_failed_csv(store, account_name, order, "failed_purchase_orders")
+            failure = "Purchase order creation was not confirmed by Brightpearl."
+            report_path = write_open_purchases_failed_csv(store, account_name, order, "failed_purchase_orders", error=failure)
             with sqlite3.connect(db_path) as conn:
                 conn.execute(
                     "UPDATE open_purchases_live_orders SET state = 'unknown', error = ?, updated_at = ? WHERE order_ref = ?",
@@ -1914,7 +1920,8 @@ def run_open_purchases_order(store: Store, request_id: str, params: dict[str, An
                 failed_rows.append(row)
             check_cancel(request_id)
     if failed_rows:
-        report_path = write_open_purchases_failed_csv(store, account_name, order, "failed_purchase_order_rows", failed_rows)
+        failure = "One or more rows failed. The order id is saved; retry will reuse it."
+        report_path = write_open_purchases_failed_csv(store, account_name, order, "failed_purchase_order_rows", failed_rows, failure)
         with sqlite3.connect(db_path) as conn:
             conn.execute(
                 "UPDATE open_purchases_live_orders SET state = 'row_failed', rows_state = 'failed', error = ?, updated_at = ? WHERE order_ref = ?",
@@ -1935,18 +1942,21 @@ def run_open_purchases_order(store: Store, request_id: str, params: dict[str, An
     if payment_required and order.get("payment_method_code") and order.get("payment_date"):
         payment_payload = build_purchase_payment_payload(order_id, order)
         with legacy_operation(store):
-            ok, _ = post_purchase_payment(payment_url, headers, payment_payload, cancel_token=cancel_token)
+            ok, payment_response = post_purchase_payment(payment_url, headers, payment_payload, cancel_token=cancel_token)
         if not ok:
-            report_path = write_open_purchases_failed_csv(store, account_name, order, "failed_purchase_order_payments")
+            reason = str(payment_response or "Brightpearl did not return a payment error body.")
+            failure = f"Payment failed: {reason}"
+            report_path = write_open_purchases_failed_csv(store, account_name, order, "failed_purchase_order_payments", error=failure)
             with sqlite3.connect(db_path) as conn:
                 conn.execute(
                     "UPDATE open_purchases_live_orders SET state = 'payment_failed', payment_state = 'failed', error = ?, updated_at = ? WHERE order_ref = ?",
-                    (f"Payment failed. The order id is saved; retry will reuse it. Failed CSV: {report_path}", time.time(), order_ref),
+                    (f"{failure}. The order id is saved; retry will reuse it. Failed CSV: {report_path}", time.time(), order_ref),
                 )
-            raise WorkerError("write_uncertain", f"Purchase order {order_ref}: payment failed. The order id {order_id} is saved; retry will not recreate the order. Failed CSV: {report_path}.")
+            raise WorkerError("write_uncertain", f"Purchase order {order_ref}: {failure}. The order id {order_id} is saved; retry will not recreate the order. Failed CSV: {report_path}.")
         payment_state = "succeeded"
     elif payment_required:
-        report_path = write_open_purchases_failed_csv(store, account_name, order, "failed_purchase_order_payments")
+        failure = "Payment amount is present but payment_date or payment_method_code is missing."
+        report_path = write_open_purchases_failed_csv(store, account_name, order, "failed_purchase_order_payments", error=failure)
         with sqlite3.connect(db_path) as conn:
             conn.execute(
                 "UPDATE open_purchases_live_orders SET state = 'payment_failed', payment_state = 'missing_details', error = ?, updated_at = ? WHERE order_ref = ?",

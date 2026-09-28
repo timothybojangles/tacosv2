@@ -586,6 +586,11 @@ def test_open_sales_live_retry_reuses_saved_order_id(tmp_path, monkeypatch, caps
 
     with sqlite3.connect(db_path) as conn:
         assert conn.execute("SELECT orderId FROM validated_sales_orders").fetchone()[0] == 999
+    failed_report = next((tmp_path / "appdata" / "accounts" / "demo" / "reports").glob("*failed_sales_order_payments*.csv"))
+    with failed_report.open(encoding="utf-8", newline="") as report:
+        report_rows = list(csv.DictReader(report))
+    assert "error" in report_rows[0]
+    assert "payment method not valid" in report_rows[0]["error"]
 
     with (
         patch.object(worker, "post_sales_order") as create_order_again,
@@ -1090,15 +1095,21 @@ def test_open_purchases_live_retry_reuses_saved_order_id_and_suppresses_stdout(t
     with (
         patch.object(worker, "post_purchase_order", return_value=(True, 3002)) as create_order,
         patch.object(worker, "post_purchase_row", return_value=(True, None)),
-        patch.object(worker, "post_purchase_payment", return_value=(False, None)),
+        patch.object(worker, "post_purchase_payment", return_value=(False, "HTTP 400: supplier payment method invalid")),
     ):
         handle(store, _request("runOpenPurchasesOrder", {"accountName": "demo", "confirmAccountName": "demo"}, "purchases-live-1"))
     failed = json.loads(capsys.readouterr().out.splitlines()[-1])
     assert failed["error"]["code"] == "write_uncertain"
+    assert "supplier payment method invalid" in failed["error"]["message"]
     create_order.assert_called_once()
 
     with sqlite3.connect(db_path) as conn:
         assert conn.execute("SELECT orderId FROM validated_purchase_orders").fetchone()[0] == 3002
+    failed_report = next((tmp_path / "appdata" / "accounts" / "demo" / "reports").glob("*failed_purchase_order_payments*.csv"))
+    with failed_report.open(encoding="utf-8", newline="") as report:
+        report_rows = list(csv.DictReader(report))
+    assert "error" in report_rows[0]
+    assert "supplier payment method invalid" in report_rows[0]["error"]
 
     def noisy_payment(*args, **kwargs):
         print("PURCHASE PAYMENT raw legacy line")

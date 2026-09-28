@@ -687,6 +687,10 @@ export default function App() {
           setOpenPurchasesActiveRequestId("");
           const status = await engine("openPurchasesLiveStatus", { accountName });
           setOpenPurchasesLiveStatus(status);
+          setOpenPurchasesProgress((current) => current ? {
+            ...current,
+            message: `Stopped at first write error. ${status.remaining ?? 0} order(s) remain unprocessed; fix or reconcile the failed order before retrying.`,
+          } : current);
           throw err;
         }
         const status = await engine("openPurchasesLiveStatus", { accountName });
